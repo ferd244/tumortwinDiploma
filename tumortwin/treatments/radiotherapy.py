@@ -32,9 +32,69 @@ def compute_radiotherapy_cell_death_fractions(
         for day, dose in radiotherapy_specification.protocol.items()
     }
 
+def compute_radiotherapy_cell_proliferation(
+        rt: RadiotherapySpecification, radiotherapy_days: dict[float, float], time: float
+) -> float:
+    """
+      Compute the reduction of proliferation due to cumulative dose of radiotherapy
 
-def compute_radiotherapy_cell_survival_fraction(
-    rt: RadiotherapySpecification, dose: float
+      This function uses the linear-quadratic model to compute the survival fraction, which we assume relates to what
+      proportion of the remaining cells are able to actively proliferate
+
+      Args:
+          rt (RadiotherapySpecification): Radiotherapy parameters, including alpha_lt {long term effects} and
+              alpha/beta ratio.
+          radiotherapy_days (dict): lists time and dose of radiotherapy delivered
+           time (float): current simulation time
+
+      Returns:
+          float: The fraction of the tumor capable of proliferating
+      """
+
+    past_doses = [dose for day, dose in radiotherapy_days.items() if day <= time]
+    if not past_doses:
+        return 1.0
+    beta = rt.alpha_proliferation / rt.alpha_beta_ratio
+    survival_fractions = [
+        np.exp(-(rt.alpha_proliferation * dose + beta * dose ** 2))
+        for dose in past_doses
+    ]
+
+    # The total survival is the *product* of all individual survival fractions
+    total_survival = np.prod(survival_fractions)
+    return total_survival
+
+def compute_radiotherapy_cell_death(
+        rt: RadiotherapySpecification, radiotherapy_days: dict[float, float], time: float
+) -> float:
+    """
+      Compute the increase of tumor death rate due to cumulative dose of radiotherapy
+
+      This function uses the linear-quadratic model to compute the survival fraction, which we assume relates to the death rate
+
+      Args:
+          rt (RadiotherapySpecification): Radiotherapy parameters, including alpha_lt {long term effects} and
+              alpha/beta ratio.
+          radiotherapy_days (dict): lists time and dose of radiotherapy delivered
+           time (float): current simulation time
+
+      Returns:
+          float: The fraction of the tumor that is dying
+      """
+
+    past_doses = [dose for day, dose in radiotherapy_days.items() if day <= time]
+    if not past_doses:
+        return 0.0
+    beta = rt.alpha_death / rt.alpha_beta_ratio
+    survival_fractions = [
+        np.exp(-(rt.alpha_death * dose + beta * dose ** 2))
+        for dose in past_doses
+    ]
+
+    total_kill_fraction = 1.0 - np.prod(survival_fractions)
+    return total_kill_fraction
+
+def compute_radiotherapy_cell_survival_fraction(rt: RadiotherapySpecification, dose: float
 ) -> float:
     """
     Compute the cell survival fraction for a single radiotherapy dose.

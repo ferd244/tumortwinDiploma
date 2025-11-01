@@ -9,6 +9,8 @@ from tumortwin.models.base import TumorGrowthModel3D
 from tumortwin.preprocessing import bound_condition_maker
 from tumortwin.treatments import (
     compute_radiotherapy_cell_survival_fraction,
+    compute_radiotherapy_cell_proliferation,
+    compute_radiotherapy_cell_death,
     compute_total_cell_death_chemo,
 )
 from tumortwin.types import (
@@ -30,6 +32,7 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
 
     Attributes:
         k (torch.Tensor): Tumor growth rate parameter (proliferation rate).
+        k_d (torch.Tensor): death rate due to radiotherapy (increases with each dose of RT)
         d (torch.Tensor): Tumor diffusion coefficient (spatial spread rate).
         theta (torch.Tensor): Carrying capacity of the tumor cells (maximum density).
         bcs (torch.Tensor): Boundary conditions derived from the patient brain mask.
@@ -61,6 +64,7 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         patient_data: Union[HGGPatientData, TNBCPatientData],
         initial_time: datetime,
         *,
+        k_d: Optional[torch.Tensor] = None,
         radiotherapy_specification: Optional[RadiotherapySpecification] = None,
         chemotherapy_specifications: Optional[List[ChemotherapySpecification]] = None,
         radiotherapy_days=None,
@@ -73,6 +77,7 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         Args:
             k (torch.Tensor): Tumor proliferation rate tensor.
             d (torch.Tensor): Tumor diffusion coefficient tensor.
+            k_d (torch.Tensor): tumor death rate due to radiotherapy (increases with each dose of RT).
             theta (torch.Tensor): Tumor carrying capacity tensor.
             patient_data (HGGPatientData): Patient-specific data including brain mask and imaging.
             initial_time (datetime): Initial simulation time.
@@ -84,6 +89,12 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         super().__init__()
         self.device = device
         self.k = nn.Parameter(k.to(device), requires_grad=require_grad)
+        if k_d is None:
+            k_d_tensor = torch.zeros_like(k, device=device)
+            self.k_d = nn.Parameter(k_d_tensor, requires_grad=False)
+        else:
+            self.k_d = nn.Parameter(k_d.to(device), requires_grad=require_grad)
+
         self.d = nn.Parameter(d.to(device), requires_grad=require_grad)
         self.theta = theta.to(device)
         mask_image = (
@@ -94,7 +105,7 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         self.bcs = torch.from_numpy(bound_condition_maker(mask_image).array)
         self.comp_mask = torch.from_numpy(mask_image.array)
         self.radiotherapy_specification = radiotherapy_specification
-        if radiotherapy_specification:
+        if self.radiotherapy_specification:
             self.radiotherapy_days = dict(
                 [
                     (float((day - initial_time).days), dose)
@@ -159,17 +170,53 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
             if self.chemotherapy_specifications
             else None
         )
+
+        radiotherapy_effect_death = (
+            compute_radiotherapy_cell_death(
+                self.radiotherapy_specification,
+                self.radiotherapy_days, float(t)
+            )
+            if self.radiotherapy_specification
+            else None
+        )
+
+        radiotherapy_effect_prolif = (
+            compute_radiotherapy_cell_proliferation(
+                self.radiotherapy_specification,
+                self.radiotherapy_days, float(t)
+            )
+            if self.radiotherapy_specification
+            else None
+        )
+
         device = self.device
         u = u.to(device)
         self.k = self.k.to(device)
+        self.k_d = self.k_d.to(device)
         self.theta = self.theta.to(device)
+        death_term = 0.0
 
         diffusion_term = self.d * self._compute_laplacian(u)
         proliferation_term = torch.multiply(
             u, torch.multiply(self.k, (1.0 - torch.clamp(u, 0.0, 1.0) / self.theta))
         )
+
+        if radiotherapy_effect_prolif is not None:
+            if not isinstance(radiotherapy_effect_prolif, torch.Tensor):
+                rt_effect = torch.tensor(radiotherapy_effect_prolif, device=device, dtype=u.dtype)
+            else:
+                rt_effect = radiotherapy_effect_prolif.to(device)
+            proliferation_term = torch.multiply(proliferation_term, rt_effect)
+
+        if radiotherapy_effect_death is not None:
+            if not isinstance(radiotherapy_effect_death, torch.Tensor):
+                rtd_effect = torch.tensor(radiotherapy_effect_death, device=device, dtype=u.dtype)
+            else:
+                rtd_effect = radiotherapy_effect_death.to(device)
+            death_term = torch.multiply(u,torch.multiply(torch.multiply(self.k_d, rtd_effect),  (1.0 - torch.clamp(u, 0.0, 1.0) / self.theta)))
+
         chemotherapy_term = chemotherapy_effect * u if chemotherapy_effect else 0.0
-        dudt = diffusion_term + proliferation_term - chemotherapy_term
+        dudt = diffusion_term + proliferation_term - chemotherapy_term - death_term
         return dudt
 
     def callback_step(self, t, u, dt):

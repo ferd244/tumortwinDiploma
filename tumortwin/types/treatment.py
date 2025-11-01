@@ -62,6 +62,8 @@ class RadiotherapySpecification(BaseModel):
     Attributes:
         alpha (float): Tissue-specific radiosensitivity parameter (α).
         alpha_beta_ratio (float): Tissue-specific α/β ratio.
+        alpha_proliferation (float): tissue-specific radiosensitivity parameter that adjusts the proliferation rate
+        alpha_death (float): tissue-specific radiosensitivity parameter that adjusts the death rate
         times (List[TreatmentTime]): Times of the treatments in the protocol.
         doses (List[float]): Doses corresponding to each treatment time.
         protocol(RadiotherapyProtocol): The complete mapping of treatment times to radiotherapy doses.
@@ -69,6 +71,8 @@ class RadiotherapySpecification(BaseModel):
 
     alpha: float
     alpha_beta_ratio: float
+    alpha_proliferation: float = 0.0
+    alpha_death: float = 0.0
     times: List[TreatmentTime]
     doses: List[float]
 

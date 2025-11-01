@@ -9,5 +9,7 @@ from .chemotherapy import (
 from .radiotherapy import (
     compute_radiotherapy_cell_death_fractions,
     compute_radiotherapy_cell_survival_fraction,
+    compute_radiotherapy_cell_proliferation,
+    compute_radiotherapy_cell_death,
     plot_radiotherapy,
 )
