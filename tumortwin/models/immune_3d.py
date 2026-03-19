@@ -122,6 +122,58 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         # Временные параметры
         self.t_initial = initial_time
 
+    def get_initial_state(self) -> torch.Tensor:
+        """
+        Специальный метод для подготовки начального тензора для ForwardSolver.
+        Объединяет начальные поля опухоли и лимфоцитов в один 4D тензор.
+        """
+        return torch.stack([self.u1_initial, self.u4_initial], dim=0)
+
+    @torch.enable_grad()
+    def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        # Ваш существующий код forward корректен, так как он уже 
+        # умеет разделять u на u1 и u4 (u[0], u[1])
+        # ... (ваш код) ...
+        return torch.stack([du1_dt, du4_dt])
+
+    def callback_step(self, t: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+        """
+        Применяется после каждого шага решения в прямом направлении.
+        """
+        # 1. Применяем радиотерапию (дискретно)
+        t_float = float(t)
+        if self.radiotherapy_specification is not None and t_float in self.radiotherapy_days:
+            survival = compute_radiotherapy_cell_survival_fraction(
+                self.radiotherapy_specification, self.radiotherapy_days[t_float]
+            )
+            u = u * survival
+
+        # 2. Разделяем для применения масок и клиппинга
+        u1, u4 = u[0], u[1]
+        
+        mask = self.comp_mask.bool()
+        u1 = u1 * mask
+        u4 = u4 * mask
+
+        u1 = torch.clamp(u1, min=0.0, max=1.0)
+        u4 = torch.clamp(u4, min=0.0)
+
+        return torch.stack([u1, u4])
+
+    def callback_step_adjoint(self, t: torch.Tensor, adj_u: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+        """
+        КРИТИЧНО ДЛЯ SOLVER: Применяется при обратном проходе (Adjoint method).
+        Обеспечивает корректность градиентов, обнуляя их там, где поле заблокировано маской.
+        """
+        # adj_u имеет ту же форму, что и u: (2, H, W, D)
+        mask = self.comp_mask.bool()
+        
+        # Обнуляем градиенты вне анатомической маски
+        adj_u1 = adj_u[0] * mask
+        adj_u4 = adj_u[1] * mask
+        
+        return torch.stack([adj_u1, adj_u4])
+
     def _prepare_fd_stencils(self):
         """Вычисление коэффициентов для оператора Лапласа и градиента."""
         spacing = [self.spacing.x, self.spacing.y, self.spacing.z]
