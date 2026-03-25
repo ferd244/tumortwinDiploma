@@ -162,7 +162,7 @@ class ImmuneResponse3D(TumorGrowthModel3D):
 
     def callback_step_adjoint(self, t: torch.Tensor, adj_u: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
         """
-        КРИТИЧНО ДЛЯ SOLVER: Применяется при обратном проходе (Adjoint method).
+        Применяется при обратном проходе (Adjoint method).
         Обеспечивает корректность градиентов, обнуляя их там, где поле заблокировано маской.
         """
         # adj_u имеет ту же форму, что и u: (2, H, W, D)
@@ -196,9 +196,6 @@ class ImmuneResponse3D(TumorGrowthModel3D):
             self.fd_stencil_forward.append(
                 self._central_slice(forward_mask, ax) * 2.0 * inv_dx2
             )
-
-        # Для конвекции понадобятся веса для первой производной (центральные разности)
-        # Можно предвычислить, но проще вычислять на лету с учётом шага.
 
     @torch.enable_grad()
     def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
@@ -361,7 +358,6 @@ class ImmuneResponse3D(TumorGrowthModel3D):
 
         return grad
 
-    # Методы для извлечения срезов (как в ReactionDiffusion3D)
     def _backward_slice(self, x: torch.Tensor, ax: int):
         return torch.narrow(x, ax, 0, x.shape[ax] - 2)
 
