@@ -22,7 +22,7 @@ To jump right in, click a badge below to launch one of our tutorial notebooks in
 
 [![Triple-negative breast cancer (TNBC) Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OncologyModelingGroup/TumorTwin/blob/main/tutorials/TNBC_Demo.ipynb)
 
-**Coupled PDE system (immune + tumor)** — same workflow as the HGG demo, for stacked state `(C,D,H,W)`: run `tutorials/PDE_System_Demo.ipynb` locally (see docs *Tutorials → Coupled PDE system*).
+**Coupled PDE system (immune + tumor)** — uses **`HGG_demo_001` imaging and JSON** (same files as **HGG_Demo**): `tutorials/PDE_System_Demo.ipynb` (see docs *Tutorials → Coupled PDE system*).
 
 ## Full Documentation
 

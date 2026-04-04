@@ -36,7 +36,7 @@ nav:
       - Triple-negative breast cancer (TNBC): tutorials/TNBC_Demo.ipynb
     - Cropping : tutorials/Cropping_Demo.ipynb
     - Gradient Computation : tutorials/HGG_Gradients.ipynb
-    - Coupled PDE system (immune demo) : tutorials/PDE_System_Demo.ipynb
+    - Coupled PDE (HGG_demo_001 + immune) : tutorials/PDE_System_Demo.ipynb
   - Developers:
     - developers/developer.md
   - Theory:
