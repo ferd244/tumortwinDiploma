@@ -5,6 +5,7 @@ from .pde_system import (
     PDESystemModel3D,
     apply_spatial_mask_to_state,
     expand_mask_for_components,
+    extract_state_component,
     extract_trajectory_component,
     stack_pde_components,
     unbind_components,

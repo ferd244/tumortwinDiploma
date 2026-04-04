@@ -114,7 +114,7 @@ class ImmuneResponse3D(PDESystemModel3D):
         self.comp_mask = torch.from_numpy(mask_image.array).to(device)
         self.spacing = mask_image.spacing  # для шагов сетки
 
-        # Предвычисление коэффициентов для конечных разностей
+        # Предвычисление коэффициентов для конечных разностей (как в ReactionDiffusion3D)
         self._prepare_fd_stencils()
 
         # Параметры лечения
@@ -144,6 +144,12 @@ class ImmuneResponse3D(PDESystemModel3D):
         self.t_initial = initial_time
         self.progress_bar: Optional[tqdm.tqdm] = None
 
+    def _prepare_fd_stencils(self) -> None:
+        """Создаёт ``spatial_fd`` по граничным тегам и шагам сетки (ось 0,1,2 = D,H,W)."""
+        sp = self.spacing
+        spacing_xyz = [sp.x, sp.y, sp.z]
+        self.spatial_fd = FiniteDifferenceOperator3D(self.bcs, spacing_xyz)
+
     def get_initial_state(self) -> torch.Tensor:
         """
         Специальный метод для подготовки начального тензора для ForwardSolver.
@@ -158,7 +164,7 @@ class ImmuneResponse3D(PDESystemModel3D):
 
         Args:
             t: текущее время (дни от начала)
-            u: тензор состояния формы (2, H, W, D) или (batch, 2, H, W, D)
+            u: тензор состояния ``(2, D, H, W)`` или ``(batch, 2, D, H, W)``
 
         Returns:
             du_dt: тензор той же формы
@@ -188,9 +194,9 @@ class ImmuneResponse3D(PDESystemModel3D):
         self.v = self.v.to(device)
 
         # Разделение полей
-        if u.dim() == 4:  # (2, H, W, D)
+        if u.dim() == 4:  # (2, D, H, W)
             u1, u4 = u[0], u[1]
-        else:  # (batch, 2, H, W, D)
+        else:  # (batch, 2, D, H, W)
             u1, u4 = u[:, 0], u[:, 1]
 
         # Применяем ограничения для численной устойчивости

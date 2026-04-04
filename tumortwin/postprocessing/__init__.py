@@ -1,4 +1,9 @@
 # flake8: noqa: F401
+from tumortwin.models.pde_system import (
+    extract_state_component,
+    extract_trajectory_component,
+)
+
 from .calibration_summary import (
     plot_calibration,
     plot_calibration_iter,

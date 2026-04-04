@@ -29,9 +29,11 @@ We provide a [`BasePatientData`](https://github.com/OncologyModelingGroup/TumorT
 ## Modifying or creating a new `TumorGrowthModel`
 We provide a basic [3D reaction-diffusion model of tumor growth](https://github.com/OncologyModelingGroup/TumorTwin/blob/36c21b45b526cd506d3421b509af813e1357b473/tumortwin/models/reaction_diffusion_3d.py) (for details see the [Theory page](../theory/theory.md)).
 
-This model inherits from a base `TumorGrowth3D` class. At it's core, the `TumorGrowth3D` interface defines an explicit ordinary differential equation (ODE) model. The `forward(t, u)` method evaluates the right-hand-side of the equation, i.e., the time derivative `du/dt`. In our reaction-diffusion example, the `forward()` method performs spatial discretization of the PDE model, and evaluates the time-derivative `du/dt` for the vector of voxel-wise cellularities, `u`.
+This model inherits from a base `TumorGrowthModel3D` class. At its core, that interface defines an explicit ordinary differential equation (ODE) model. The `forward(t, u)` method evaluates the right-hand-side of the equation, i.e., the time derivative `du/dt`. In our reaction-diffusion example, the `forward()` method performs spatial discretization of the PDE model, and evaluates the time-derivative `du/dt` for the vector of voxel-wise cellularities, `u`.
 
-To implement your own model, you might consider implementing your own subclass of `TumorGrowthModel`. The core task here is to implement the `forward()` method that evaluates the right-hand side of the equation for your particular model, leveraging whatever `PatientData` and parameters you wish to provide the model.
+**Coupled PDE systems:** Several scalar fields can be stacked as one state `(C, D, H, W)` (see `PDESystemModel3D` and `ImmuneResponse3D`). The same `TorchDiffEqSolver` applies. For plotting, total cell count, and least-squares calibration on **one** component (usually tumor, index `0`), use `tumortwin.pde_workflow` and the tutorial `tutorials/PDE_System_Demo.ipynb`.
+
+To implement your own model, subclass `TumorGrowthModel3D` (or `PDESystemModel3D` for multi-field systems). Implement `forward(t, u)` returning the same tensor shape as `u`, using the `PatientData` and parameters you need.
 
 Note that this model will be used in the `torchdiffeq` solver, and as such it supports discrete events via the `callback_step` and `callback_step_adjoint` methods which allow you to modify the ODE solution at each timestep of the forward and backward passes, respectively (see [`torchdiffeq` documentation](https://github.com/rtqichen/torchdiffeq/blob/master/FURTHER_DOCUMENTATION.md#callbacks) for more details).
 
@@ -46,7 +48,7 @@ We provide an interface to the [`torchdiffeq`](https://github.com/rtqichen/torch
 If you wish to implement your own solver, you may wish to create a subclass of the `ForwardSolver` class and implement the `solve()` method.
 
 ## Experimenting with different `Optimizer` strategies
-A `TumorGrowth3D` model should be directly compatible with `pytorch.optim` [`Optimizer`](https://pytorch.org/docs/stable/optim.html) objects. This provides access to a variety of different optimization algorithms. Alternatively, you might wish to refer to our custom [Levenberg-Marquardt optimizer](https://github.com/OncologyModelingGroup/TumorTwin/blob/36c21b45b526cd506d3421b509af813e1357b473/tumortwin/optimizers/lm_optimizer.py) to see how you might implement a custom optimizer.
+A `TumorGrowthModel3D` model should be directly compatible with `pytorch.optim` [`Optimizer`](https://pytorch.org/docs/stable/optim.html) objects. This provides access to a variety of different optimization algorithms. Alternatively, you might wish to refer to our custom [Levenberg-Marquardt optimizer](https://github.com/OncologyModelingGroup/TumorTwin/blob/36c21b45b526cd506d3421b509af813e1357b473/tumortwin/optimizers/lm_optimizer.py) to see how you might implement a custom optimizer.
 
 ## Need further guidance?
 If you are still unsure about how you might extend `TumorTwin` to suit your needs, feel free to reach out to one of the authors. The best way to do this is by [opening a GitHub Issue](https://github.com/OncologyModelingGroup/TumorTwin/issues/new/choose).

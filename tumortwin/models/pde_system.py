@@ -86,6 +86,29 @@ def apply_spatial_mask_to_state(
     return u * m
 
 
+def extract_state_component(u: torch.Tensor, component_idx: int = 0) -> torch.Tensor:
+    """
+    Select one scalar PDE field from a state at a single time (not a time series).
+
+    Shapes:
+        - Single-field: ``(D, H, W)`` — returned as-is when ``component_idx == 0``.
+        - Coupled system: ``(C, D, H, W)`` — returns ``u[component_idx]`` with shape ``(D, H, W)``.
+
+    Use with plotting / ``compute_total_cell_count`` when the solver state stacks multiple components.
+    """
+    if u.dim() == 3:
+        if component_idx != 0:
+            raise ValueError(
+                "State is (D, H, W); component_idx must be 0."
+            )
+        return u
+    if u.dim() == 4:
+        return u[component_idx].contiguous()
+    raise ValueError(
+        f"Expected state ndim 3 or 4, got {u.dim()} {tuple(u.shape)}."
+    )
+
+
 def extract_trajectory_component(
     trajectory: torch.Tensor, component_idx: int = 0
 ) -> torch.Tensor:
@@ -121,10 +144,6 @@ class PDESystemModel3D(TumorGrowthModel3D):
     """
 
     layout: ClassVar[PDEStateLayout] = PDEStateLayout(num_components=1)
-
-    @property
-    def num_state_components(self) -> int:
-        return self.layout.num_components
 
     @property
     def num_state_components(self) -> int:
