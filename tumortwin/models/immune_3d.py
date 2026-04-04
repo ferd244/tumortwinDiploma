@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+import tqdm.auto as tqdm
 from datetime import datetime, timedelta
-from typing import Optional, List, Union
+from typing import ClassVar, List, Optional, Union
 
-from tumortwin.models.base import TumorGrowthModel3D
+from tumortwin.models.pde_system import PDEStateLayout, PDESystemModel3D
 from tumortwin.preprocessing import bound_condition_maker
+from tumortwin.spatial import FiniteDifferenceOperator3D
 from tumortwin.treatments import (
     compute_radiotherapy_cell_survival_fraction,
     compute_total_cell_death_chemo,
@@ -15,10 +17,9 @@ from tumortwin.types import (
     HGGPatientData,
     TNBCPatientData,
 )
-from tumortwin.types.utility import Boundary
 
 
-class ImmuneResponse3D(TumorGrowthModel3D):
+class ImmuneResponse3D(PDESystemModel3D):
     """
     Пространственная модель иммунного ответа на опухоль.
 
@@ -38,6 +39,8 @@ class ImmuneResponse3D(TumorGrowthModel3D):
 
     Лечение (радиотерапия, химиотерапия) добавляется дополнительными членами гибели.
     """
+
+    layout: ClassVar[PDEStateLayout] = PDEStateLayout(num_components=2)
 
     def __init__(
         self,
@@ -77,16 +80,25 @@ class ImmuneResponse3D(TumorGrowthModel3D):
             v = torch.tensor(v, dtype=torch.float32, device=device)
         self.v = nn.Parameter(v.to(device), requires_grad=require_grad)
 
+        u4_src = float(u4_source)
         # Начальные поля
-        self.register_buffer('u1_initial', initial_u1.to(device))
+        self.register_buffer("u1_initial", initial_u1.to(device))
         if initial_u4 is None:
-            self.register_buffer('u4_initial', torch.full_like(initial_u1, u4_source))
+            self.register_buffer(
+                "u4_initial", torch.full_like(initial_u1.to(device), u4_src)
+            )
         else:
-            self.register_buffer('u4_initial', initial_u4.to(device))
+            self.register_buffer("u4_initial", initial_u4.to(device))
 
-        # Параметры источника лимфоцитов
-        self.u4_source = u4_source
-        self.source_rate = source_rate
+        # Параметры источника лимфоцитов (как k/d в ReactionDiffusion3D — в оптимизаторе)
+        self.u4_source = nn.Parameter(
+            torch.tensor(u4_src, dtype=torch.float32, device=device),
+            requires_grad=require_grad,
+        )
+        self.source_rate = nn.Parameter(
+            torch.tensor(float(source_rate), dtype=torch.float32, device=device),
+            requires_grad=require_grad,
+        )
         if source_mask is not None:
             self.register_buffer('source_mask', source_mask.to(device).bool())
         else:
@@ -115,12 +127,22 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         else:
             self.radiotherapy_days = {}
 
-        self.chemotherapy_specifications = chemotherapy_specifications or []
-        self.chemo_sensitivity_tumor = chemo_sensitivity_tumor
-        self.chemo_sensitivity_lymph = chemo_sensitivity_lymph
+        self.chemotherapy_specifications = chemotherapy_specifications
+        self.ct_sens = nn.ParameterList(
+            [spec.sensitivity for spec in self.chemotherapy_specifications or []]
+        )
+        self.chemo_sensitivity_tumor = nn.Parameter(
+            torch.tensor(float(chemo_sensitivity_tumor), dtype=torch.float32, device=device),
+            requires_grad=require_grad,
+        )
+        self.chemo_sensitivity_lymph = nn.Parameter(
+            torch.tensor(float(chemo_sensitivity_lymph), dtype=torch.float32, device=device),
+            requires_grad=require_grad,
+        )
 
         # Временные параметры
         self.t_initial = initial_time
+        self.progress_bar: Optional[tqdm.tqdm] = None
 
     def get_initial_state(self) -> torch.Tensor:
         """
@@ -128,74 +150,6 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         Объединяет начальные поля опухоли и лимфоцитов в один 4D тензор.
         """
         return torch.stack([self.u1_initial, self.u4_initial], dim=0)
-
-    @torch.enable_grad()
-    def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        # Ваш существующий код forward корректен, так как он уже 
-        # умеет разделять u на u1 и u4 (u[0], u[1])
-        # ... (ваш код) ...
-        return torch.stack([du1_dt, du4_dt])
-
-    def callback_step(self, t: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
-        """
-        Применяется после каждого шага решения в прямом направлении.
-        """
-        # 1. Применяем радиотерапию (дискретно)
-        t_float = float(t)
-        if self.radiotherapy_specification is not None and t_float in self.radiotherapy_days:
-            survival = compute_radiotherapy_cell_survival_fraction(
-                self.radiotherapy_specification, self.radiotherapy_days[t_float]
-            )
-            u = u * survival
-
-        # 2. Разделяем для применения масок и клиппинга
-        u1, u4 = u[0], u[1]
-        
-        mask = self.comp_mask.bool()
-        u1 = u1 * mask
-        u4 = u4 * mask
-
-        u1 = torch.clamp(u1, min=0.0, max=1.0)
-        u4 = torch.clamp(u4, min=0.0)
-
-        return torch.stack([u1, u4])
-
-    def callback_step_adjoint(self, t: torch.Tensor, adj_u: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
-        """
-        Применяется при обратном проходе (Adjoint method).
-        Обеспечивает корректность градиентов, обнуляя их там, где поле заблокировано маской.
-        """
-        # adj_u имеет ту же форму, что и u: (2, H, W, D)
-        mask = self.comp_mask.bool()
-        
-        # Обнуляем градиенты вне анатомической маски
-        adj_u1 = adj_u[0] * mask
-        adj_u4 = adj_u[1] * mask
-        
-        return torch.stack([adj_u1, adj_u4])
-
-    def _prepare_fd_stencils(self):
-        """Вычисление коэффициентов для оператора Лапласа и градиента."""
-        spacing = [self.spacing.x, self.spacing.y, self.spacing.z]
-        self.fd_stencil_backward = []
-        self.fd_stencil_central = []
-        self.fd_stencil_forward = []
-
-        for ax in [0, 1, 2]:
-            back_mask = self.bcs[:, :, :, ax] == Boundary.BACKWARD.value
-            interior_mask = self.bcs[:, :, :, ax] == Boundary.INTERIOR.value
-            forward_mask = self.bcs[:, :, :, ax] == Boundary.FORWARD.value
-
-            inv_dx2 = 1.0 / (spacing[ax] * spacing[ax])
-            self.fd_stencil_backward.append(
-                self._central_slice(back_mask, ax) * 2.0 * inv_dx2
-            )
-            self.fd_stencil_central.append(
-                self._central_slice(interior_mask, ax) * 1.0 * inv_dx2
-            )
-            self.fd_stencil_forward.append(
-                self._central_slice(forward_mask, ax) * 2.0 * inv_dx2
-            )
 
     @torch.enable_grad()
     def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
@@ -209,6 +163,30 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         Returns:
             du_dt: тензор той же формы
         """
+        if self.chemotherapy_specifications:
+            if self.t_initial is None:
+                raise ValueError(
+                    "Unable to compute chemotherapy effect. No initial time set!"
+                )
+
+        chemotherapy_effect = (
+            compute_total_cell_death_chemo(
+                self.t_initial + timedelta(days=t.item()),
+                self.chemotherapy_specifications,
+            )
+            if self.chemotherapy_specifications
+            else None
+        )
+
+        device = self.device
+        u = u.to(device)
+        self.D1 = self.D1.to(device)
+        self.mu1 = self.mu1.to(device)
+        self.gamma12 = self.gamma12.to(device)
+        self.D4 = self.D4.to(device)
+        self.gamma21 = self.gamma21.to(device)
+        self.v = self.v.to(device)
+
         # Разделение полей
         if u.dim() == 4:  # (2, H, W, D)
             u1, u4 = u[0], u[1]
@@ -219,14 +197,12 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         u1 = torch.clamp(u1, min=0.0)
         u4 = torch.clamp(u4, min=0.0)
 
-        # Лапласианы
-        lap1 = self._compute_laplacian(u1)
-        lap4 = self._compute_laplacian(u4)
+        lap1 = self.spatial_fd.laplacian(u1)
+        lap4 = self.spatial_fd.laplacian(u4)
 
-        # Конвективный член: - v · ∇u4
-        # Вычисляем градиент u4 по каждой оси
-        grad_u4 = self._compute_gradient(u4)  # список [grad_x, grad_y, grad_z] или тензор (3, H, W, D)
-        convection = -torch.sum(self.v[:, None, None, None] * grad_u4, dim=0)  # поэлементное умножение и сумма
+        grad_u4 = self.spatial_fd.gradient(u4)
+        vb = self.v.view(3, *([1] * (grad_u4.dim() - 1)))
+        convection = -torch.sum(vb * grad_u4, dim=0)
 
         # Взаимодействие
         interaction12 = self.gamma12 * u1 * u4
@@ -235,16 +211,15 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         # Источник лимфоцитов (поступление из сосудов)
         source = 0.0
         if self.source_mask is not None:
-            source = self.source_rate * self.source_mask * (self.u4_source - u4)
+            sm = self.source_mask.to(device)
+            source = self.source_rate * sm * (self.u4_source - u4)
 
         # Эффект химиотерапии (непрерывный)
         chemo_tumor = 0.0
         chemo_lymph = 0.0
-        if self.chemotherapy_specifications and self.t_initial is not None:
-            current_time = self.t_initial + timedelta(days=float(t))
-            chemo_effect = compute_total_cell_death_chemo(current_time, self.chemotherapy_specifications)
-            chemo_tumor = self.chemo_sensitivity_tumor * chemo_effect
-            chemo_lymph = self.chemo_sensitivity_lymph * chemo_effect
+        if chemotherapy_effect is not None:
+            chemo_tumor = self.chemo_sensitivity_tumor * chemotherapy_effect
+            chemo_lymph = self.chemo_sensitivity_lymph * chemotherapy_effect
 
         # Производные
         du1_dt = self.D1 * lap1 + self.mu1 * u1 - interaction12 - chemo_tumor * u1
@@ -256,35 +231,34 @@ class ImmuneResponse3D(TumorGrowthModel3D):
         else:
             return torch.stack([du1_dt, du4_dt], dim=1)
 
-    def callback_step(self, t: torch.Tensor, u: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+    def callback_step(self, t, u, dt):
         """
-        Обновление состояния после шага интегратора.
-        Применяет радиотерапию и ограничения.
+        Шаг после интегратора (torchdiffeq): радиотерапия, маска, клиппинг.
         """
-        # Радиотерапия (дискретное событие)
+        if self.progress_bar:
+            self.progress_bar.update(dt.item())
         t_float = float(t)
-        if self.radiotherapy_specification is not None and t_float in self.radiotherapy_days:
+        if (
+            self.radiotherapy_specification is not None
+            and t_float in self.radiotherapy_days
+        ):
             survival = compute_radiotherapy_cell_survival_fraction(
                 self.radiotherapy_specification, self.radiotherapy_days[t_float]
             )
-            u = u * survival  # применяем одинаково к обоим полям
+            u = u * survival
 
-        # Разделяем поля для обработки
         if u.dim() == 4:
             u1, u4 = u[0], u[1]
         else:
             u1, u4 = u[:, 0], u[:, 1]
 
-        # Обнуление вне маски
-        mask = self.comp_mask.bool()
+        mask = self.comp_mask.to(u.device).bool()
         u1 = u1 * mask
         u4 = u4 * mask
 
-        # Клиппинг
-        u1 = torch.clamp(u1, min=0.0, max=1.0)  # предполагаем нормировку плотности опухоли
-        u4 = torch.clamp(u4, min=0.0)           # лимфоциты могут быть любыми
+        u1 = torch.clamp(u1, min=0.0, max=1.0)
+        u4 = torch.clamp(u4, min=0.0)
 
-        # Сборка обратно
         if u.dim() == 4:
             u = torch.stack([u1, u4])
         else:
@@ -292,82 +266,28 @@ class ImmuneResponse3D(TumorGrowthModel3D):
 
         return u
 
-    # ---------- Вспомогательные методы для конечных разностей ----------
-    def _compute_laplacian(self, field: torch.Tensor) -> torch.Tensor:
-        """Вычисление лапласиана для одного поля."""
-        laplacian = torch.zeros_like(field)
-        for ax in [0, 1, 2]:
-            back_coeff = self.fd_stencil_backward[ax].to(field.device)
-            cent_coeff = self.fd_stencil_central[ax].to(field.device)
-            forw_coeff = self.fd_stencil_forward[ax].to(field.device)
-
-            back = self._backward_slice(field, ax)
-            cent = self._central_slice(field, ax)
-            forw = self._forward_slice(field, ax)
-
-            contrib = (
-                back_coeff * (back - cent) +
-                cent_coeff * (back - 2*cent + forw) +
-                forw_coeff * (forw - cent)
+    def callback_step_adjoint(self, t, u, dt):
+        """
+        Adjoint callback (torchdiffeq): ``u`` — кортеж расширенного состояния
+        ``(vjp_t, y, adj_y, *vjp_params)``; согласован с ``ReactionDiffusion3D.callback_step_adjoint``.
+        """
+        if (
+            self.radiotherapy_specification is not None
+            and float(t) in self.radiotherapy_days
+        ):
+            survival = compute_radiotherapy_cell_survival_fraction(
+                self.radiotherapy_specification,
+                self.radiotherapy_days[float(t)],
             )
-            self._central_slice(laplacian, ax).add_(contrib)
-        return laplacian
+            u[2].mul_(survival)
 
-    def _compute_gradient(self, field: torch.Tensor) -> torch.Tensor:
-        """
-        Вычисление градиента поля по всем осям.
-        Возвращает тензор формы (3, H, W, D) или (3, ...).
-        Используются центральные разности, на границах – односторонние.
-        """
-        grad = torch.zeros((3,) + field.shape, device=field.device, dtype=field.dtype)
-        for ax in [0, 1, 2]:
-            dx = [self.spacing.x, self.spacing.y, self.spacing.z][ax]
-            # Маски границ
-            back_mask = self.bcs[:, :, :, ax] == Boundary.BACKWARD.value
-            interior_mask = self.bcs[:, :, :, ax] == Boundary.INTERIOR.value
-            forward_mask = self.bcs[:, :, :, ax] == Boundary.FORWARD.value
+        mask = self.comp_mask.to(u[2].device).bool()
+        adj_y = u[2]
+        if adj_y.dim() == 4:
+            adj_y[0].mul_(mask)
+            adj_y[1].mul_(mask)
+        elif adj_y.dim() == 5:
+            adj_y[:, 0].mul_(mask)
+            adj_y[:, 1].mul_(mask)
 
-            # Центральная разность для внутренних точек
-            if interior_mask.any():
-                cent = self._central_slice(field, ax)
-                back = self._backward_slice(field, ax)
-                forw = self._forward_slice(field, ax)
-                grad_cent = (forw - back) / (2 * dx)
-                # Запись в центральный срез градиента
-                grad_slice = self._central_slice(grad[ax], ax)
-                mask_slice = self._central_slice(interior_mask, ax)
-                grad_slice[mask_slice] = grad_cent[mask_slice]
-
-            # BACKWARD (нет точки слева) -> forward разность
-            if back_mask.any():
-                cent = self._central_slice(field, ax)
-                forw = self._forward_slice(field, ax)
-                grad_back = (forw - cent) / dx
-                grad_slice = self._central_slice(grad[ax], ax)
-                mask_slice = self._central_slice(back_mask, ax)
-                grad_slice[mask_slice] = grad_back[mask_slice]
-
-            # FORWARD (нет точки справа) -> backward разность
-            if forward_mask.any():
-                cent = self._central_slice(field, ax)
-                back = self._backward_slice(field, ax)
-                grad_forw = (cent - back) / dx
-                grad_slice = self._central_slice(grad[ax], ax)
-                mask_slice = self._central_slice(forward_mask, ax)
-                grad_slice[mask_slice] = grad_forw[mask_slice]
-
-        return grad
-
-    def _backward_slice(self, x: torch.Tensor, ax: int):
-        return torch.narrow(x, ax, 0, x.shape[ax] - 2)
-
-    def _central_slice(self, x: torch.Tensor, ax: int):
-        return torch.narrow(x, ax, 1, x.shape[ax] - 2)
-
-    def _forward_slice(self, x: torch.Tensor, ax: int):
-        return torch.narrow(x, ax, 2, x.shape[ax] - 2)
-
-    def reset(self):
-        """Сброс состояния к начальным условиям."""
-        self.u1_initial = self.u1_initial.clone()
-        self.u4_initial = self.u4_initial.clone()
+        return u

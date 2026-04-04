@@ -4,12 +4,14 @@ import torch.nn as nn
 
 class TumorGrowthModel3D(nn.Module):
     """
-    A base class for 3D tumor growth models using PyTorch.
+    Base class for 3D tumor growth / reaction–diffusion models integrated with torchdiffeq.
 
-    This class defines the interface for tumor growth models that can simulate
-    tumor dynamics in a 3D environment. Subclasses must implement the `forward`
-    method to define the model-specific behavior.
+    State convention:
+        - Single PDE: ``u`` is ``(D, H, W)`` (legacy) or ``(1, D, H, W)`` if stacked.
+        - Systems: ``u`` is ``(C, D, H, W)`` with ``C`` coupled scalar fields; optional
+          batch dimension ``(B, C, D, H, W)``.
 
+    Subclasses implement ``forward(t, u) -> du/dt`` with the same shape as ``u``.
     """
 
     def __init__(self):
@@ -19,6 +21,11 @@ class TumorGrowthModel3D(nn.Module):
         This constructor calls the parent PyTorch `nn.Module` initializer.
         """
         super().__init__()
+
+    @property
+    def num_state_components(self) -> int:
+        """Number of scalar PDE unknowns in the stacked state (default: single field)."""
+        return 1
 
     def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         """

@@ -8,13 +8,11 @@ class ForwardSolver:
     """
     Abstract base class for forward solvers in tumor growth modeling.
 
-    A forward solver numerically integrates the evolution of the tumor density field
-    over specified timepoints, starting from an initial condition.
+    Integrates the model state (single field or stacked PDE system) forward in time.
 
     Methods:
         solve(timepoints, u_initial):
-            Computes the tumor density at each timepoint by solving the growth model.
-            Must be implemented by subclasses.
+            Returns ``(t, u)`` tensors per the concrete solver (see ``TorchDiffEqSolver``).
 
     Raises:
         NotImplementedError: If a subclass does not implement the `solve` method.
@@ -22,18 +20,18 @@ class ForwardSolver:
 
     def solve(
         self, timepoints: List[datetime], u_initial: torch.Tensor
-    ) -> Tuple[List[datetime], List[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Abstract method to solve the tumor growth model.
+        Integrate the model from ``u_initial`` through the given wall-clock ``timepoints``.
 
         Args:
-            timepoints (List[datetime]): List of timepoints at which the solution is desired.
-            u_initial (torch.Tensor): Initial tumor density field.
+            timepoints: Integration output times (datetime).
+            u_initial: Initial state; for a single PDE field typically ``(D, H, W)``, for a stacked
+                system ``(C, D, H, W)`` (see ``PDESystemModel3D`` / ``ImmuneResponse3D``).
 
         Returns:
-            Tuple[List[datetime], List[torch.Tensor]]:
-                - List of datetime objects corresponding to the solution timepoints.
-                - List of torch.Tensor objects representing the tumor density at each timepoint.
+            ``(t, u)`` both tensors: ``t`` is 1-D (days since first timepoint); ``u`` stacks the state
+            along time with shape ``(len(t), *u_initial.shape)`` (``torchdiffeq`` convention).
 
         Raises:
             NotImplementedError: If not implemented by a subclass.

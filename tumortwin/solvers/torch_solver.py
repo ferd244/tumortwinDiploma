@@ -56,18 +56,24 @@ class TorchDiffEqSolver(ForwardSolver):
 
     def solve(
         self, timepoints: List[datetime], u_initial: torch.Tensor
-    ) -> Tuple[List[datetime], List[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Solves the tumor growth model over the specified timepoints.
+        Integrates ``model.forward(t, u)`` with ``torchdiffeq``.
+
+        The state ``u`` may be a single field ``(D, H, W)`` or a coupled stack ``(C, D, H, W)``; the
+        same shape is preserved along the time dimension in the output.
 
         Args:
-            timepoints (List[datetime]): List of timepoints at which the solution is desired.
-            u_initial (torch.Tensor): Initial tumor density field.
+            timepoints: Wall-clock times at which the solution is defined (first entry is the IC time).
+            u_initial: Initial condition, same shape as the model expects (e.g. ``get_initial_state()``).
 
         Returns:
-            Tuple[List[datetime], List[torch.Tensor]]:
-                - A list of datetime objects corresponding to the solution timepoints.
-                - A list of torch.Tensor objects representing the tumor density at each timepoint.
+            ``(t, u)``:
+                ``t`` — 1-D tensor, days since ``timepoints[0]``;
+                ``u`` — tensor of shape ``(len(t), *u_initial.shape)`` (one state per row in time).
+
+            For analysis or plotting one scalar field (e.g. tumor only in a multi-species model), use
+            ``tumortwin.models.extract_trajectory_component(u, component_idx=0)``.
         """
         self.solver_options.device = self.model.device
 

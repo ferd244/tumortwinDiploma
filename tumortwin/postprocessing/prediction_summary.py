@@ -37,6 +37,10 @@ def plot_cellularity_map(
     time: Optional[float] = None,
     threshold: float = 0.01,
 ):
+    """
+    Plot a single 3D cellularity field (``(D, H, W)``). For coupled PDE trajectories from the solver,
+    pass one time slice and one component, e.g. ``u_t = full_trajectory[i, 0]`` (tumor channel).
+    """
     x_id = np.s_[:]
     y_id = np.s_[:]
     slice_id = find_best_slice(solution.detach().numpy())
@@ -76,6 +80,11 @@ def plot_predicted_TCC(
     alpha: float = 1.0,
     carrying_capacity: float = 5062500,
 ):
+    """
+    Each element of ``predicted_cellularity_maps`` must be a single spatial field ``(D, H, W)``.
+    If you have a full trajectory ``(T, C, D, H, W)``, run ``extract_trajectory_component`` first
+    so each time step is tumor-only ``(D, H, W)``.
+    """
     predicted_cell_counts = [
         compute_total_cell_count(N, carrying_capacity)
         for N in predicted_cellularity_maps
