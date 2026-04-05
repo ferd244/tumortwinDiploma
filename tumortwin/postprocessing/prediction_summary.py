@@ -33,6 +33,7 @@ def overlay_cellularity_on_t1(
 def plot_cellularity_map(
     solution: torch.Tensor,
     patient_data: BasePatientData,
+    
     ax: Optional[Axes] = None,
     time: Optional[float] = None,
     threshold: float = 0.01,
