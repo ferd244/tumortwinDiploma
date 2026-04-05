@@ -186,12 +186,12 @@ class ImmuneResponse3D(PDESystemModel3D):
 
         device = self.device
         u = u.to(device)
-        self.D1 = self.D1.to(device)
-        self.mu1 = self.mu1.to(device)
-        self.gamma12 = self.gamma12.to(device)
-        self.D4 = self.D4.to(device)
-        self.gamma21 = self.gamma21.to(device)
-        self.v = self.v.to(device)
+        D1 = self.D1.to(device)
+        mu1 = self.mu1.to(device)
+        gamma12 = self.gamma12.to(device)
+        D4 = self.D4.to(device)
+        gamma21 = self.gamma21.to(device)
+        v = self.v.to(device)
 
         # Разделение полей
         if u.dim() == 4:  # (2, D, H, W)
@@ -207,12 +207,12 @@ class ImmuneResponse3D(PDESystemModel3D):
         lap4 = self.spatial_fd.laplacian(u4)
 
         grad_u4 = self.spatial_fd.gradient(u4)
-        vb = self.v.view(3, *([1] * (grad_u4.dim() - 1)))
+        vb = v.view(3, *([1] * (grad_u4.dim() - 1)))
         convection = -torch.sum(vb * grad_u4, dim=0)
 
         # Взаимодействие
-        interaction12 = self.gamma12 * u1 * u4
-        interaction21 = self.gamma21 * u1 * u4
+        interaction12 = gamma12 * u1 * u4
+        interaction21 = gamma21 * u1 * u4
 
         # Источник лимфоцитов (поступление из сосудов)
         source = 0.0
@@ -228,8 +228,8 @@ class ImmuneResponse3D(PDESystemModel3D):
             chemo_lymph = self.chemo_sensitivity_lymph * chemotherapy_effect
 
         # Производные
-        du1_dt = self.D1 * lap1 + self.mu1 * u1 - interaction12 - chemo_tumor * u1
-        du4_dt = self.D4 * lap4 + convection - interaction21 + source - chemo_lymph * u4
+        du1_dt = D1 * lap1 + mu1 * u1 - interaction12 - chemo_tumor * u1
+        du4_dt = D4 * lap4 + convection - interaction21 + source - chemo_lymph * u4
 
         # Сборка результата
         if u.dim() == 4:
