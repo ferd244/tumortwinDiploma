@@ -94,7 +94,8 @@ class LMoptimizer:
         self.x = initial_guess.clone()
         self.x0 = self.x.clone()
         self.best_x = self.x.clone()
-        self.y_data = y_data.reshape(-1)
+        # LM builds J in float64; keep targets in the same dtype to avoid matmul dtype errors.
+        self.y_data = y_data.reshape(-1).to(dtype=torch.float64)
         self.options = options
         self._lambda = options.lambda_init
 
@@ -164,19 +165,19 @@ class LMoptimizer:
         """Initializes the optimization for the first iteration, including the Jacobian and error."""
         self._y_next = self.model(self.x)
         self._best_y = self._y_next
-        self.y = self._y_next.reshape(-1)
+        self.y = self._y_next.reshape(-1).to(dtype=torch.float64)
         self.J = self._get_jacobian()
         self._y_error_best = self.get_error(self.y, self.y_data)
         self.error_record.append(self._y_error_best.item())
         self._n_function_calls += self.x.size(0) + 1
-        self.H = self.J.T @ self.J
+        self.H = self.J.mT @ self.J
 
     def _perform_accepted_step(self) -> None:
         """Performs an accepted optimization step, updating internal variables."""
         self._accepted_step = False
         self._jac_update += 1.0
 
-        self.y = self._y_next.reshape(-1)
+        self.y = self._y_next.reshape(-1).to(dtype=torch.float64)
         self._best_y = self._y_next
         self.x = self._x_next
 
@@ -187,7 +188,7 @@ class LMoptimizer:
 
         self._y_error_best = self._y_next_error
         self._lambda /= self.options.lambda_downscale_factor
-        self.H = self.J.T @ self.J
+        self.H = self.J.mT @ self.J
         self._stuck_count = 0
 
     def _handle_stuck_condition(self) -> None:
@@ -214,7 +215,8 @@ class LMoptimizer:
             self.J = self.J.double()
             self.H = self.H.double()
             lhs_lstsq = self.H + self._lambda.double() * torch.diag(torch.diag(self.H))
-            rhs_lstsq = self.J.T @ (self.y_data - self.y)
+            residual = (self.y_data - self.y).to(dtype=torch.float64)
+            rhs_lstsq = self.J.mT @ residual
             self._deltas: torch.Tensor = torch.linalg.lstsq(
                 lhs_lstsq, rhs_lstsq
             ).solution  # the solution should be a torch.Tensor
@@ -236,7 +238,7 @@ class LMoptimizer:
         """
         self._x_next = self.x + self._deltas
         self._bound_inputs(self._x_next)
-        self._y_next = self.model(self._x_next).reshape(-1)
+        self._y_next = self.model(self._x_next).reshape(-1).to(dtype=torch.float64)
         self._n_function_calls += 1
         self._y_next_error = self.get_error(self._y_next, self.y_data)
         self.error_record.append(self._y_next_error.item())
@@ -266,7 +268,7 @@ class LMoptimizer:
         else:
             return torch.stack(
                 [self._jacobian_single_var(i) for i in range(self.x.size(0))]
-            ).T
+            ).mT
 
     def _jacobian_single_var(self, i: int) -> torch.Tensor:
         """
@@ -281,8 +283,9 @@ class LMoptimizer:
         x = self.x.clone()
         delta = self.options.jac_delta
         x[i] += delta
-        deltaY = self.model(x).reshape(-1)
-        return torch.tensor((deltaY - self.y) / delta, dtype=torch.float64)
+        deltaY = self.model(x).reshape(-1).to(dtype=torch.float64)
+        jac_delta = float(self.options.jac_delta.item())
+        return (deltaY - self.y) / jac_delta
 
     def _metric(self) -> torch.Tensor:
         """Computes the metric for deciding whether to accept a step based on the error reduction."""
@@ -299,6 +302,5 @@ class LMoptimizer:
         Returns:
             e (float): Squared error between the predicted and observed data.
         """
-        solution_deltas = y_data - y
-        e = solution_deltas.T @ solution_deltas
-        return e
+        d = y_data.to(dtype=torch.float64) - y.to(dtype=torch.float64)
+        return d @ d
