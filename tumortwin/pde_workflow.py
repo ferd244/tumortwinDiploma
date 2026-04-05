@@ -10,11 +10,38 @@ and calibration patterns apply to the **tumor component** (or any chosen channel
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional, Sequence, Union
 
 import torch
 
 from tumortwin.models.pde_system import extract_trajectory_component
+
+
+def solve_tumor_channel_trajectory(
+    solver,
+    timepoints: Sequence[datetime],
+    u_initial: torch.Tensor,
+    *,
+    component_idx: int = 0,
+) -> torch.Tensor:
+    """
+    Run ``solver.solve`` and return the tumor (or chosen) component as ``(T, D, H, W)``.
+
+    Use for calibration: match shapes to stacked measured maps ``(n_visits, D, H, W)`` when
+    ``timepoints`` are exactly the calibration visit times.
+
+    Args:
+        solver: ``TorchDiffEqSolver`` (or any object with ``solve(timepoints, u_initial)``).
+        timepoints: Wall-clock times passed to the integrator.
+        u_initial: Stacked PDE state, e.g. ``model.get_initial_state()`` for ``ImmuneResponse3D``.
+        component_idx: ``0`` = tumor in the immune–tumor model.
+
+    Returns:
+        Tensor of shape ``(len(timepoints), D, H, W)``.
+    """
+    _, trajectory = solver.solve(timepoints=list(timepoints), u_initial=u_initial)
+    return extract_trajectory_component(trajectory, component_idx)
 
 
 def trajectory_component_timeseries(
