@@ -24,7 +24,7 @@ class ImmuneResponse3D(PDESystemModel3D):
     Пространственная модель иммунного ответа на опухоль.
 
     Уравнения:
-        ∂u1/∂t = D1 ∇²u1 + μ1 u1 - γ12 u1 u4
+        ∂u1/∂t = D1 ∇²u1 + μ1 u1 (1 - u1 / θ1) - γ12 u1 u4
         ∂u4/∂t = D4 ∇²u4 - v · ∇u4 - γ21 u1 u4 + S(x) (u4^0 - u4)
 
     где:
@@ -32,6 +32,7 @@ class ImmuneResponse3D(PDESystemModel3D):
         u4 – плотность лимфоцитов,
         D1, D4 – коэффициенты диффузии,
         μ1 – скорость пролиферации опухоли,
+        θ1 – локальная предельная плотность опухолевых клеток (логистическое насыщение),
         γ12, γ21 – скорости уничтожения при контакте,
         v – вектор скорости направленного движения лимфоцитов (конвекция),
         S(x) – маска области поступления лимфоцитов (например, кровеносные сосуды),
@@ -55,6 +56,7 @@ class ImmuneResponse3D(PDESystemModel3D):
         *,
         initial_u1: torch.Tensor,                     # начальное поле опухоли
         initial_u4: Optional[torch.Tensor] = None,    # начальное поле лимфоцитов
+        theta1: torch.Tensor = torch.tensor(1.0),     # предельная плотность опухоли
         u4_source: float = 1.0,                        # концентрация лимфоцитов в крови
         source_mask: Optional[torch.Tensor] = None,    # булева маска области поступления
         source_rate: float = 0.1,                       # скорость поступления (1/день)
@@ -71,6 +73,7 @@ class ImmuneResponse3D(PDESystemModel3D):
         # Параметры модели (обучаемые)
         self.D1 = nn.Parameter(D1.to(device), requires_grad=require_grad)
         self.mu1 = nn.Parameter(mu1.to(device), requires_grad=require_grad)
+        self.theta1 = nn.Parameter(theta1.to(device), requires_grad=require_grad)
         self.gamma12 = nn.Parameter(gamma12.to(device), requires_grad=require_grad)
         self.D4 = nn.Parameter(D4.to(device), requires_grad=require_grad)
         self.gamma21 = nn.Parameter(gamma21.to(device), requires_grad=require_grad)
@@ -188,6 +191,7 @@ class ImmuneResponse3D(PDESystemModel3D):
         u = u.to(device)
         D1 = self.D1.to(device)
         mu1 = self.mu1.to(device)
+        theta1 = torch.clamp(self.theta1.to(device), min=1e-6)
         gamma12 = self.gamma12.to(device)
         D4 = self.D4.to(device)
         gamma21 = self.gamma21.to(device)
@@ -227,8 +231,9 @@ class ImmuneResponse3D(PDESystemModel3D):
             chemo_tumor = self.chemo_sensitivity_tumor * chemotherapy_effect
             chemo_lymph = self.chemo_sensitivity_lymph * chemotherapy_effect
 
-        # Производные
-        du1_dt = D1 * lap1 + mu1 * u1 - interaction12 - chemo_tumor * u1
+        # Производные: логистическая пролиферация предотвращает нереалистичный экспоненциальный рост u1
+        growth = mu1 * u1 * (1.0 - torch.clamp(u1, min=0.0) / theta1)
+        du1_dt = D1 * lap1 + growth - interaction12 - chemo_tumor * u1
         du4_dt = D4 * lap4 + convection - interaction21 + source - chemo_lymph * u4
 
         # Сборка результата

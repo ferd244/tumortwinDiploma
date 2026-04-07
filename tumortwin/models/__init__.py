@@ -1,4 +1,5 @@
 # flake8: noqa: F401
+from .avascular_tumor_3d import AvascularTumorGrowth3D
 from .immune_3d import ImmuneResponse3D
 from .pde_system import (
     PDEStateLayout,

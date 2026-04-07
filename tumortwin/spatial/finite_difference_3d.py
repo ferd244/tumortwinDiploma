@@ -128,6 +128,45 @@ class FiniteDifferenceOperator3D(nn.Module):
 
         return grad
 
+    def divergence(self, flux: torch.Tensor) -> torch.Tensor:
+        """
+        Conservative divergence ``∇·F`` for a flux vector ``F`` with shape ``(3, D, H, W)``.
+        For each axis ``a``, ``∂F_a/∂x_a`` uses the same BC-aware stencils as :meth:`gradient`.
+        """
+        if flux.shape[0] != 3:
+            raise ValueError(f"flux must have shape (3, D, H, W); got {tuple(flux.shape)}")
+        div = torch.zeros(flux.shape[1:], device=flux.device, dtype=flux.dtype)
+        for ax in (0, 1, 2):
+            comp = flux[ax]
+            dx = self.spacing[ax].to(comp.device)
+            back_mask = self.bcs[:, :, :, ax] == Boundary.BACKWARD.value
+            interior_mask = self.bcs[:, :, :, ax] == Boundary.INTERIOR.value
+            forward_mask = self.bcs[:, :, :, ax] == Boundary.FORWARD.value
+
+            if interior_mask.any():
+                cent = self._central_slice(comp, ax)
+                back = self._backward_slice(comp, ax)
+                forw = self._forward_slice(comp, ax)
+                d_cent = (forw - back) / (2.0 * dx)
+                mask_slice = self._central_slice(interior_mask, ax)
+                self._central_slice(div, ax)[mask_slice] += d_cent[mask_slice]
+
+            if back_mask.any():
+                cent = self._central_slice(comp, ax)
+                forw = self._forward_slice(comp, ax)
+                d_back = (forw - cent) / dx
+                mask_slice = self._central_slice(back_mask, ax)
+                self._central_slice(div, ax)[mask_slice] += d_back[mask_slice]
+
+            if forward_mask.any():
+                cent = self._central_slice(comp, ax)
+                back = self._backward_slice(comp, ax)
+                d_forw = (cent - back) / dx
+                mask_slice = self._central_slice(forward_mask, ax)
+                self._central_slice(div, ax)[mask_slice] += d_forw[mask_slice]
+
+        return div
+
     @staticmethod
     def laplacian_per_component(
         operator: "FiniteDifferenceOperator3D", *fields: torch.Tensor
