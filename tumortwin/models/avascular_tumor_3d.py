@@ -170,11 +170,9 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         """Approximate Δψ = rhs via Richardson iteration (ψ ← ψ + α (rhs - Δψ))."""
         psi = torch.zeros_like(rhs)
         alpha = self.poisson_relaxation
-<<<<<<< HEAD
         mask = self.comp_mask.to(device=rhs.device, dtype=rhs.dtype)
 =======
         mask = self.comp_mask.to(rhs.device).float()
->>>>>>> 25822942bb18b39f4d24982fca9b79524719c7ed
         rhs_m = torch.nan_to_num(rhs * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         for _ in range(self.poisson_iterations):
             lap = self.spatial_fd.laplacian(psi)
