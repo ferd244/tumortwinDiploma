@@ -123,7 +123,8 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         self.comp_mask = torch.from_numpy(mask_image.array).to(device)
         self.spacing = mask_image.spacing
         self._prepare_fd_stencils()
-        
+
+        # Keep solver compatibility with treatment-aware grid constructor.
         self.t_initial = None
         self.radiotherapy_specification = None
         self.chemotherapy_specifications = None
@@ -158,11 +159,11 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         psi = torch.zeros_like(rhs)
         alpha = self.poisson_relaxation
         mask = self.comp_mask.to(rhs.device).float()
-        rhs_m = rhs * mask
+        rhs_m = torch.nan_to_num(rhs * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         for _ in range(self.poisson_iterations):
             lap = self.spatial_fd.laplacian(psi)
             psi = psi + alpha * (rhs_m - lap)
-            psi = psi * mask
+            psi = torch.nan_to_num(psi * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         return psi
 
     @torch.enable_grad()
@@ -183,10 +184,10 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
             raise ValueError(f"Expected u of shape (4, D, H, W); got {tuple(u.shape)}")
         n, m, h, s = u[0], u[1], u[2], u[3]
 
-        n = torch.clamp(n, min=0.0)
-        m = torch.clamp(m, min=0.0)
-        h = torch.clamp(h, min=0.0)
-        s = torch.clamp(s, min=0.0)
+        n = torch.clamp(torch.nan_to_num(n, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+        m = torch.clamp(torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+        h = torch.clamp(torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+        s = torch.clamp(torch.nan_to_num(s, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
 
         P_s = self._P_transition(s)
         rhs_psi = B * n + L * n * h
@@ -205,7 +206,12 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         dh_dt = L * n * h - self.spatial_fd.divergence(h.unsqueeze(0) * grad_psi)
         ds_dt = Ds * self.spatial_fd.laplacian(s) + self._Q(n, s)
 
-        return torch.stack([dn_dt, dm_dt, dh_dt, ds_dt])
+        return torch.nan_to_num(
+            torch.stack([dn_dt, dm_dt, dh_dt, ds_dt]),
+            nan=0.0,
+            posinf=1e6,
+            neginf=-1e6,
+        )
 
     def callback_step(self, t, u, dt):
         if self.progress_bar is not None:
@@ -220,10 +226,10 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         def _m(x):
             return x * mask
 
-        n = torch.clamp(_m(n), min=0.0, max=1.0)
-        m = torch.clamp(_m(m), min=0.0, max=1.0)
-        h = torch.clamp(_m(h), min=0.0, max=1.0)
-        s = torch.clamp(_m(s), min=0.0)
+        n = torch.clamp(torch.nan_to_num(_m(n), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
+        m = torch.clamp(torch.nan_to_num(_m(m), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
+        h = torch.clamp(torch.nan_to_num(_m(h), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
+        s = torch.clamp(torch.nan_to_num(_m(s), nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
 
         return torch.stack([n, m, h, s])
 
