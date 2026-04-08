@@ -123,7 +123,10 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         self.comp_mask = torch.from_numpy(mask_image.array).to(device)
         self.spacing = mask_image.spacing
         self._prepare_fd_stencils()
-
+        
+        self.t_initial = None
+        self.radiotherapy_specification = None
+        self.chemotherapy_specifications = None
         self.progress_bar = None
 
     def _prepare_fd_stencils(self) -> None:
