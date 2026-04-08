@@ -170,7 +170,7 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         """Approximate Δψ = rhs via Richardson iteration (ψ ← ψ + α (rhs - Δψ))."""
         psi = torch.zeros_like(rhs)
         alpha = self.poisson_relaxation
-        mask = self.comp_mask.to(rhs.device).float()
+        mask = self.comp_mask.to(device=rhs.device, dtype=rhs.dtype)
         rhs_m = torch.nan_to_num(rhs * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         for _ in range(self.poisson_iterations):
             lap = self.spatial_fd.laplacian(psi)
@@ -240,7 +240,6 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         h = torch.nan_to_num(h * tissue, nan=0.0, posinf=1.0, neginf=0.0)
         s = torch.nan_to_num(s * tissue, nan=0.0, posinf=1.0, neginf=0.0)
 
-<<<<<<< HEAD
         n[tissue <= 0] = 0.0
         m[tissue <= 0] = 0.0
         h[tissue <= 0] = 0.0
@@ -250,12 +249,6 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         m = torch.clamp(m, min=0.0, max=1.0)
         h = torch.clamp(h, min=0.0, max=1.0)
         s = torch.clamp(s, min=0.0)
-=======
-        n = torch.clamp(torch.nan_to_num(_m(n), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
-        m = torch.clamp(torch.nan_to_num(_m(m), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
-        h = torch.clamp(torch.nan_to_num(_m(h), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
-        s = torch.clamp(torch.nan_to_num(_m(s), nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
->>>>>>> 25822942bb18b39f4d24982fca9b79524719c7ed
 
         return torch.stack([n, m, h, s])
 
