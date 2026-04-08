@@ -50,6 +50,8 @@ def plot_imaging_summary(patient_data: BasePatientData):
             anatomic_image = getattr(patient_data, attr, None)
 
     for col_idx, visit in enumerate(patient_data.visits):
+        adc = None
+        roi = None
         for attr in dir(visit):
             if "adc" in attr and isinstance(
                 getattr(patient_data, attr, None), (NibabelNifti, type(None))
@@ -57,12 +59,17 @@ def plot_imaging_summary(patient_data: BasePatientData):
                 adc = getattr(visit, attr, None)
 
             if "roi_enhance" in attr and isinstance(
-                getattr(patient_data, attr, None), (NibabelNifti, type(None))
+                getattr(visit, attr, None), (NibabelNifti, type(None))
             ):
                 roi = getattr(visit, attr, None)
 
         if col_idx == 0:
-            best_slice = find_best_slice(roi.array)
+            ref = roi.array if roi is not None else adc.array if adc is not None else None
+            if ref is None:
+                print("No ADC/ROI on first visit for slice selection; skipping imaging summary.")
+                plt.close(fig)
+                return
+            best_slice = find_best_slice(ref)
 
         if adc is not None:
             if anatomic_image is not None:
