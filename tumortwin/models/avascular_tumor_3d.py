@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -72,15 +73,15 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         super().__init__()
         self.device = device
         self.poisson_iterations = int(poisson_iterations)
-        # Stable Richardson step ~ h^2 / (2d) for d=3 (scaled by 0.35 for margin)
-        h_min = float(
-            min(
-                patient_data.brainmask_image.spacing.x,
-                patient_data.brainmask_image.spacing.y,
-                patient_data.brainmask_image.spacing.z,
-            )
+
+        mask_image = (
+            patient_data.breastmask_image
+            if hasattr(patient_data, "breastmask_image")
+            else patient_data.brainmask_image
         )
-        default_relax = 0.35 * (h_min ** 2) / 6.0
+        # Stable Richardson step ~ h^2 / (2d) for d=3 (scaled by 0.35 for margin)
+        h_min = float(min(mask_image.spacing.x, mask_image.spacing.y, mask_image.spacing.z))
+        default_relax = 0.35 * (h_min**2) / 6.0
         self.poisson_relaxation = float(
             poisson_relaxation if poisson_relaxation is not None else default_relax
         )
@@ -114,13 +115,17 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         else:
             self.register_buffer("s_initial", initial_s.to(device).float())
 
-        mask_image = (
-            patient_data.breastmask_image
-            if hasattr(patient_data, "breastmask_image")
-            else patient_data.brainmask_image
-        )
+        # Binary mask: 1 inside tissue / ROI, 0 outside (same convention as ReactionDiffusion3D).
+        mask_np = np.asarray(mask_image.array, dtype=float)
+        if not (mask_np > 0).any():
+            raise ValueError(
+                "Anatomical mask is empty (all zeros). Check patient mask / crop (CropSettings)."
+            )
         self.bcs = torch.from_numpy(bound_condition_maker(mask_image).array).to(device)
-        self.comp_mask = torch.from_numpy(mask_image.array).to(device)
+        self.comp_mask = torch.as_tensor(mask_np, dtype=torch.float32, device=device).clamp(
+            0.0, 1.0
+        )
+        self.comp_mask = (self.comp_mask > 0).float()
         self.spacing = mask_image.spacing
         self._prepare_fd_stencils()
 
@@ -136,8 +141,15 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         self.spatial_fd = FiniteDifferenceOperator3D(self.bcs, spacing_xyz)
 
     def get_initial_state(self) -> torch.Tensor:
+        m = self.comp_mask
         return torch.stack(
-            [self.n_initial, self.m_initial, self.h_initial, self.s_initial], dim=0
+            [
+                self.n_initial * m,
+                self.m_initial * m,
+                self.h_initial * m,
+                self.s_initial * m,
+            ],
+            dim=0,
         )
 
     def _P_transition(self, s: torch.Tensor) -> torch.Tensor:
@@ -158,7 +170,11 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         """Approximate Δψ = rhs via Richardson iteration (ψ ← ψ + α (rhs - Δψ))."""
         psi = torch.zeros_like(rhs)
         alpha = self.poisson_relaxation
+<<<<<<< HEAD
+        mask = self.comp_mask.to(device=rhs.device, dtype=rhs.dtype)
+=======
         mask = self.comp_mask.to(rhs.device).float()
+>>>>>>> 25822942bb18b39f4d24982fca9b79524719c7ed
         rhs_m = torch.nan_to_num(rhs * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         for _ in range(self.poisson_iterations):
             lap = self.spatial_fd.laplacian(psi)
@@ -216,25 +232,39 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
     def callback_step(self, t, u, dt):
         if self.progress_bar is not None:
             self.progress_bar.update(dt.item())
-        mask = self.comp_mask.to(u.device).float().bool()
+        tissue = self.comp_mask.to(device=u.device, dtype=u.dtype)
         if u.dim() != 4:
             raise ValueError(
                 f"callback_step expects shape (4, D, H, W); got {tuple(u.shape)}"
             )
         n, m, h, s = u[0], u[1], u[2], u[3]
 
-        def _m(x):
-            return x * mask
+        n = torch.nan_to_num(n * tissue, nan=0.0, posinf=1.0, neginf=0.0)
+        m = torch.nan_to_num(m * tissue, nan=0.0, posinf=1.0, neginf=0.0)
+        h = torch.nan_to_num(h * tissue, nan=0.0, posinf=1.0, neginf=0.0)
+        s = torch.nan_to_num(s * tissue, nan=0.0, posinf=1.0, neginf=0.0)
 
+<<<<<<< HEAD
+        n[tissue <= 0] = 0.0
+        m[tissue <= 0] = 0.0
+        h[tissue <= 0] = 0.0
+        s[tissue <= 0] = 0.0
+
+        n = torch.clamp(n, min=0.0, max=1.0)
+        m = torch.clamp(m, min=0.0, max=1.0)
+        h = torch.clamp(h, min=0.0, max=1.0)
+        s = torch.clamp(s, min=0.0)
+=======
         n = torch.clamp(torch.nan_to_num(_m(n), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         m = torch.clamp(torch.nan_to_num(_m(m), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         h = torch.clamp(torch.nan_to_num(_m(h), nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         s = torch.clamp(torch.nan_to_num(_m(s), nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+>>>>>>> 25822942bb18b39f4d24982fca9b79524719c7ed
 
         return torch.stack([n, m, h, s])
 
     def callback_step_adjoint(self, t, u, dt):
-        mask = self.comp_mask.to(u[2].device).bool()
+        mask = self.comp_mask.to(device=u[2].device, dtype=torch.bool)
         adj_y = u[2]
         if adj_y.dim() == 4:
             for c in range(adj_y.shape[0]):
