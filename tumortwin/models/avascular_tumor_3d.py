@@ -28,6 +28,7 @@ Field packing in the ODE state: ``[n, m, h, s]`` with shape ``(4, D, H, W)``.
 
 from __future__ import annotations
 
+import warnings
 from typing import ClassVar, Optional, Union
 
 import numpy as np
@@ -122,11 +123,21 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
                 "Anatomical mask is empty (all zeros). Check patient mask / crop (CropSettings)."
             )
         self.bcs = torch.from_numpy(bound_condition_maker(mask_image).array).to(device)
-        self.comp_mask = torch.as_tensor(mask_np, dtype=torch.float32, device=device).clamp(
-            0.0, 1.0
-        )
-        self.comp_mask = (self.comp_mask > 0).float()
+        comp = torch.as_tensor(mask_np, dtype=torch.float32).clamp(0.0, 1.0)
+        comp = (comp > 0).float()
+        # Must be a buffer so ``model.to(device)`` keeps mask aligned with integrated state.
+        self.register_buffer("comp_mask", comp.to(device))
         self.spacing = mask_image.spacing
+        _nin = float((self.n_initial * self.comp_mask).sum())
+        _nsum = float(self.n_initial.sum())
+        if _nsum > 1e-6 and _nin < 1e-4 * _nsum:
+            warnings.warn(
+                "Initial tumor mass is almost entirely outside the anatomical mask "
+                "(n_initial * comp_mask is tiny vs n_initial sum). "
+                "Check brainmask vs cellularity grid alignment after crop.",
+                UserWarning,
+                stacklevel=2,
+            )
         self._prepare_fd_stencils()
 
         # Keep solver compatibility with treatment-aware grid constructor.

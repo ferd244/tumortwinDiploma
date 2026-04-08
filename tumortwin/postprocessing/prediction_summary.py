@@ -14,7 +14,11 @@ from tumortwin.utils import days_since_first, find_best_slice
 def overlay_cellularity_on_t1(
     cellularity: np.ndarray, t1: np.ndarray, threshold: float
 ):
-    normalized_t1 = (t1 - np.min(t1)) / (np.max(t1) - np.min(t1))
+    t1_min, t1_max = float(np.min(t1)), float(np.max(t1))
+    if t1_max > t1_min:
+        normalized_t1 = (t1 - t1_min) / (t1_max - t1_min)
+    else:
+        normalized_t1 = np.zeros_like(t1, dtype=np.float64)
     t1_rgb = np.stack(
         [normalized_t1] * 3, axis=-1
     )  # Convert grayscale to 3-channel RGB
@@ -53,14 +57,12 @@ def plot_cellularity_map(
         cellularity=cellularity_image, t1=t1_image, threshold=threshold
     )
 
-    vmax_value = cellularity_image.max()
-
     # Create figure and subplots
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(4, 4))
 
-    # Plot images
-    _ = ax.imshow(blended_image, vmin=0, vmax=vmax_value)
+    # RGB uint8 from overlay; do not pass vmin/vmax (they are for scalar data, not 0–255 RGB).
+    ax.imshow(np.asarray(blended_image))
 
     # Titles with Times New Roman font
     if time is not None:
