@@ -25,11 +25,12 @@ def tiny_avascular_model():
     initial_n = torch.rand(shape, dtype=torch.float32) * 0.2
     model = AvascularTumorGrowth3D(
         B=torch.tensor(0.05, dtype=torch.float32),
-        L=torch.tensor(0.02, dtype=torch.float32),
+        L=torch.tensor(-0.02, dtype=torch.float32),
         Dn=torch.tensor(0.01, dtype=torch.float32),
         Ds=torch.tensor(0.05, dtype=torch.float32),
         mu=torch.tensor(0.01, dtype=torch.float32),
         q_s=torch.tensor(0.5, dtype=torch.float32),
+        K=torch.tensor(1.0, dtype=torch.float32),
         s_0=torch.tensor(0.1, dtype=torch.float32),
         s_x=torch.tensor(0.5, dtype=torch.float32),
         s_K=torch.tensor(0.5, dtype=torch.float32),

@@ -11,7 +11,7 @@ Coupled PDEs (3D, conservative flux form used in code):
 
 with
 
-    P(s)   = 1 − tanh(s / s_x),
+    P(s)   = B K (1 − tanh(s / s_x)),
     Q(n,s) = − q_s n s / (s + s_0),
     g(s)   = g_0 arctan(s / s_K).
 
@@ -66,6 +66,7 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         initial_m: Optional[torch.Tensor] = None,
         initial_h: Optional[torch.Tensor] = None,
         initial_s: Optional[torch.Tensor] = None,
+        K: Optional[torch.Tensor] = None,
         poisson_iterations: int = 48,
         poisson_relaxation: Optional[float] = None,
         require_grad: bool = True,
@@ -93,10 +94,17 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         self.Ds = nn.Parameter(Ds.to(device), requires_grad=require_grad)
         self.mu = nn.Parameter(mu.to(device), requires_grad=require_grad)
         self.q_s = nn.Parameter(q_s.to(device), requires_grad=require_grad)
+        if K is None:
+            K = torch.tensor(1.0, dtype=torch.float32, device=device)
+        self.K = nn.Parameter(K.to(device), requires_grad=require_grad)
         self.s_0 = nn.Parameter(s_0.to(device), requires_grad=require_grad)
         self.s_x = nn.Parameter(s_x.to(device), requires_grad=require_grad)
         self.s_K = nn.Parameter(s_K.to(device), requires_grad=require_grad)
         self.g_0 = nn.Parameter(g_0.to(device), requires_grad=require_grad)
+        if torch.any(self.L.detach() >= 0):
+            raise ValueError(
+                "Strict article model requires L < 0 (tumor-healthy interaction suppression)."
+            )
 
         self.register_buffer("n_initial", initial_n.to(device).float())
         if initial_m is None:
@@ -164,9 +172,9 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         )
 
     def _P_transition(self, s: torch.Tensor) -> torch.Tensor:
-        """P(s) = 1 - tanh(s / s_x), drives n -> m when nutrient is low."""
+        """P(s) = B K (1 - tanh(s / s_x)), strict article form for n -> m conversion."""
         sx = torch.clamp(self.s_x.to(s.device), min=1e-6)
-        return 1.0 - torch.tanh(s / sx)
+        return self.B.to(s.device) * self.K.to(s.device) * (1.0 - torch.tanh(s / sx))
 
     def _dg_ds(self, s: torch.Tensor) -> torch.Tensor:
         sk = torch.clamp(self.s_K.to(s.device), min=1e-6)
