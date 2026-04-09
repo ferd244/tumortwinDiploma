@@ -69,6 +69,7 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         initial_h: Optional[torch.Tensor] = None,
         initial_s: Optional[torch.Tensor] = None,
         K: Optional[torch.Tensor] = None,
+        time_scale_days: float = 30.0,
         poisson_iterations: int = 48,
         poisson_relaxation: Optional[float] = None,
         require_grad: bool = True,
@@ -77,6 +78,9 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         super().__init__()
         self.device = device
         self.poisson_iterations = int(poisson_iterations)
+        self.time_scale_days = float(time_scale_days)
+        if self.time_scale_days <= 0:
+            raise ValueError("time_scale_days must be > 0.")
 
         mask_image = (
             patient_data.breastmask_image
@@ -314,6 +318,7 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
             posinf=1e6,
             neginf=-1e6,
         )
+        out = out / self.time_scale_days
         # region agent log
         self._debug_log(
             "H3",
@@ -321,10 +326,12 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
             "forward output finite and magnitudes",
             {
                 "finite": bool(torch.isfinite(out).all().detach().cpu().item()),
+                "time_scale_days": float(self.time_scale_days),
                 "dn_max": float(torch.nan_to_num(dn_dt).max().detach().cpu().item()),
                 "dm_max": float(torch.nan_to_num(dm_dt).max().detach().cpu().item()),
                 "dh_max": float(torch.nan_to_num(dh_dt).max().detach().cpu().item()),
                 "ds_max": float(torch.nan_to_num(ds_dt).max().detach().cpu().item()),
+                "scaled_out_abs_max": float(torch.abs(out).max().detach().cpu().item()),
             },
         )
         # endregion
