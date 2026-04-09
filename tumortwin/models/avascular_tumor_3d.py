@@ -3,7 +3,7 @@ Four-field avascular tumor model (n, m, h, s) with nutrient s and auxiliary velo
 
 Coupled PDEs (3D, conservative flux form used in code):
 
-    ∂n/∂t = B P(s) n + ∇·(D_n ∇n − μ n ∇g(s)) − ∇·(n ∇ψ),
+    ∂n/∂t = B n − P(s) n + ∇·((1−n)(D_n ∇n − μ n ∇g(s))) − ∇·(n ∇ψ),
     ∂m/∂t = P(s) n − ∇·(m ∇ψ),
     ∂h/∂t = L n h − ∇·(h ∇ψ),
     ∂s/∂t = D_s Δs + Q(n,s),
@@ -207,7 +207,7 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
             raise ValueError(f"Expected u of shape (4, D, H, W); got {tuple(u.shape)}")
         n, m, h, s = u[0], u[1], u[2], u[3]
 
-        n = torch.clamp(torch.nan_to_num(n, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+        n = torch.clamp(torch.nan_to_num(n, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         m = torch.clamp(torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
         h = torch.clamp(torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
         s = torch.clamp(torch.nan_to_num(s, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
@@ -220,11 +220,13 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         dg_ds = self._dg_ds(s)
         grad_g = grad_s * dg_ds.unsqueeze(0)
 
-        flux_tumor_mvmt = Dn * self.spatial_fd.gradient(n) - mu * n.unsqueeze(0) * grad_g
+        flux_tumor_mvmt = (1.0 - n).unsqueeze(0) * (
+            Dn * self.spatial_fd.gradient(n) - mu * n.unsqueeze(0) * grad_g
+        )
         div_tumor_mvmt = self.spatial_fd.divergence(flux_tumor_mvmt)
         div_n_psi = self.spatial_fd.divergence(n.unsqueeze(0) * grad_psi)
 
-        dn_dt = B * P_s * n + div_tumor_mvmt - div_n_psi
+        dn_dt = B * n - P_s * n + div_tumor_mvmt - div_n_psi
         dm_dt = P_s * n - self.spatial_fd.divergence(m.unsqueeze(0) * grad_psi)
         dh_dt = L * n * h - self.spatial_fd.divergence(h.unsqueeze(0) * grad_psi)
         ds_dt = Ds * self.spatial_fd.laplacian(s) + self._Q(n, s)
