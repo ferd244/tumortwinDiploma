@@ -331,6 +331,17 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         return out
 
     def callback_step(self, t, u, dt):
+        # region agent log
+        self._debug_log(
+            "H5_callback_not_used",
+            "avascular_tumor_3d.py:callback_step",
+            "callback_step invoked",
+            {
+                "t": float(t.detach().cpu().item()) if torch.is_tensor(t) and t.numel() == 1 else 0.0,
+                "dt": float(dt.detach().cpu().item()) if torch.is_tensor(dt) and dt.numel() == 1 else 0.0,
+            },
+        )
+        # endregion
         if self.progress_bar is not None:
             self.progress_bar.update(dt.item())
         tissue = self.comp_mask.to(device=u.device, dtype=u.dtype)
