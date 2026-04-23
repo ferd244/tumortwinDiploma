@@ -28,8 +28,6 @@ Field packing in the ODE state: ``[n, m, h, s]`` with shape ``(4, D, H, W)``.
 
 from __future__ import annotations
 
-import json
-import time
 import warnings
 from typing import ClassVar, Optional, Union
 
@@ -165,24 +163,6 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         spacing_xyz = [sp.x, sp.y, sp.z]
         self.spatial_fd = FiniteDifferenceOperator3D(self.bcs, spacing_xyz)
 
-    # region agent log
-    def _debug_log(self, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-        try:
-            payload = {
-                "sessionId": "7ec28f",
-                "runId": "pre-fix",
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            }
-            with open("D:/Diploma/tumortwinDiploma/debug-7ec28f.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
-    # endregion
-
     def get_initial_state(self) -> torch.Tensor:
         m = self.comp_mask
         return torch.stack(
@@ -238,48 +218,15 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         if u.dim() != 4:
             raise ValueError(f"Expected u of shape (4, D, H, W); got {tuple(u.shape)}")
         n, m, h, s = u[0], u[1], u[2], u[3]
-        # region agent log
-        self._debug_log(
-            "H1",
-            "avascular_tumor_3d.py:forward_entry",
-            "forward entry state stats",
-            {
-                "t": float(t.detach().cpu().item()) if torch.is_tensor(t) and t.numel() == 1 else 0.0,
-                "n_max": float(torch.nan_to_num(n).max().detach().cpu().item()),
-                "m_max": float(torch.nan_to_num(m).max().detach().cpu().item()),
-                "h_max": float(torch.nan_to_num(h).max().detach().cpu().item()),
-                "s_max": float(torch.nan_to_num(s).max().detach().cpu().item()),
-                "B": float(B.detach().cpu().item()),
-                "L": float(L.detach().cpu().item()),
-                "Dn": float(Dn.detach().cpu().item()),
-                "Ds": float(Ds.detach().cpu().item()),
-                "mu": float(mu.detach().cpu().item()),
-                "q_s": float(self.q_s.detach().cpu().item()),
-                "K": float(self.K.detach().cpu().item()),
-            },
-        )
-        # endregion
-
         n = torch.clamp(torch.nan_to_num(n, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
-        m = torch.clamp(torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
-        h = torch.clamp(torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
+        # Treat m and h as local volume fractions (same as n): enforce [0, 1] each RHS call.
+        # This prevents explosive advection/reaction feedback from transient overshoots within RK stages.
+        m = torch.clamp(torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
+        h = torch.clamp(torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         s = torch.clamp(torch.nan_to_num(s, nan=0.0, posinf=1.0, neginf=0.0), min=0.0)
 
         P_s = self._P_transition(s)
         rhs_psi = B * n + L * n * h
-        # region agent log
-        self._debug_log(
-            "H1",
-            "avascular_tumor_3d.py:reaction_terms",
-            "reaction term magnitudes",
-            {
-                "P_s_max": float(torch.nan_to_num(P_s).max().detach().cpu().item()),
-                "P_s_mean": float(torch.nan_to_num(P_s).mean().detach().cpu().item()),
-                "rhs_psi_max": float(torch.nan_to_num(rhs_psi).max().detach().cpu().item()),
-                "rhs_psi_min": float(torch.nan_to_num(rhs_psi).min().detach().cpu().item()),
-            },
-        )
-        # endregion
         psi = self._solve_psi(rhs_psi)
         grad_psi = self.spatial_fd.gradient(psi)
         grad_s = self.spatial_fd.gradient(s)
@@ -296,22 +243,6 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         dm_dt = P_s * n - self.spatial_fd.divergence(m.unsqueeze(0) * grad_psi)
         dh_dt = L * n * h - self.spatial_fd.divergence(h.unsqueeze(0) * grad_psi)
         ds_dt = Ds * self.spatial_fd.laplacian(s) + self._Q(n, s)
-        # region agent log
-        self._debug_log(
-            "H2",
-            "avascular_tumor_3d.py:transport_terms",
-            "transport and substrate derivatives",
-            {
-                "psi_max": float(torch.nan_to_num(psi).max().detach().cpu().item()),
-                "psi_min": float(torch.nan_to_num(psi).min().detach().cpu().item()),
-                "div_n_psi_max": float(torch.nan_to_num(div_n_psi).max().detach().cpu().item()),
-                "div_tumor_mvmt_max": float(torch.nan_to_num(div_tumor_mvmt).max().detach().cpu().item()),
-                "ds_dt_max": float(torch.nan_to_num(ds_dt).max().detach().cpu().item()),
-                "ds_dt_min": float(torch.nan_to_num(ds_dt).min().detach().cpu().item()),
-            },
-        )
-        # endregion
-
         out = torch.nan_to_num(
             torch.stack([dn_dt, dm_dt, dh_dt, ds_dt]),
             nan=0.0,
@@ -319,36 +250,9 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
             neginf=-1e6,
         )
         out = out / self.time_scale_days
-        # region agent log
-        self._debug_log(
-            "H3",
-            "avascular_tumor_3d.py:forward_exit",
-            "forward output finite and magnitudes",
-            {
-                "finite": bool(torch.isfinite(out).all().detach().cpu().item()),
-                "time_scale_days": float(self.time_scale_days),
-                "dn_max": float(torch.nan_to_num(dn_dt).max().detach().cpu().item()),
-                "dm_max": float(torch.nan_to_num(dm_dt).max().detach().cpu().item()),
-                "dh_max": float(torch.nan_to_num(dh_dt).max().detach().cpu().item()),
-                "ds_max": float(torch.nan_to_num(ds_dt).max().detach().cpu().item()),
-                "scaled_out_abs_max": float(torch.abs(out).max().detach().cpu().item()),
-            },
-        )
-        # endregion
         return out
 
     def callback_step(self, t, u, dt):
-        # region agent log
-        self._debug_log(
-            "H5_callback_not_used",
-            "avascular_tumor_3d.py:callback_step",
-            "callback_step invoked",
-            {
-                "t": float(t.detach().cpu().item()) if torch.is_tensor(t) and t.numel() == 1 else 0.0,
-                "dt": float(dt.detach().cpu().item()) if torch.is_tensor(dt) and dt.numel() == 1 else 0.0,
-            },
-        )
-        # endregion
         if self.progress_bar is not None:
             self.progress_bar.update(dt.item())
         tissue = self.comp_mask.to(device=u.device, dtype=u.dtype)
