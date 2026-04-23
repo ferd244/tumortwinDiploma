@@ -233,13 +233,15 @@ class AvascularTumorGrowth3D(PDESystemModel3D):
         dg_ds = self._dg_ds(s)
         grad_g = grad_s * dg_ds.unsqueeze(0)
 
-        flux_tumor_mvmt = (1.0 - n).unsqueeze(0) * (
+        free_space = torch.clamp(1.0 - (n + m + h), min=0.0, max=1.0)
+
+        flux_tumor_mvmt = free_space.unsqueeze(0) * (
             Dn * self.spatial_fd.gradient(n) - mu * n.unsqueeze(0) * grad_g
         )
         div_tumor_mvmt = self.spatial_fd.divergence(flux_tumor_mvmt)
         div_n_psi = self.spatial_fd.divergence(n.unsqueeze(0) * grad_psi)
 
-        dn_dt = B * n - P_s * n + div_tumor_mvmt - div_n_psi
+        dn_dt = B * n * free_space - P_s * n + div_tumor_mvmt - div_n_psi
         dm_dt = P_s * n - self.spatial_fd.divergence(m.unsqueeze(0) * grad_psi)
         dh_dt = L * n * h - self.spatial_fd.divergence(h.unsqueeze(0) * grad_psi)
         ds_dt = Ds * self.spatial_fd.laplacian(s) + self._Q(n, s)
