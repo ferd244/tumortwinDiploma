@@ -21,6 +21,7 @@ Default smooth transition:
 
 from __future__ import annotations
 
+import warnings
 from typing import ClassVar, Optional, Union
 
 import numpy as np
@@ -109,10 +110,20 @@ class HemoInvasion3D(PDESystemModel3D):
         if initial_m is None:
             self.register_buffer("m_initial", torch.zeros_like(self.n_initial))
         else:
+            if initial_m.shape != self.n_initial.shape:
+                raise ValueError(
+                    "initial_m must have the same shape as initial_n: "
+                    f"{tuple(initial_m.shape)} vs {tuple(self.n_initial.shape)}"
+                )
             self.register_buffer("m_initial", initial_m.to(device).float())
         if initial_s is None:
             self.register_buffer("s_initial", torch.ones_like(self.n_initial))
         else:
+            if initial_s.shape != self.n_initial.shape:
+                raise ValueError(
+                    "initial_s must have the same shape as initial_n: "
+                    f"{tuple(initial_s.shape)} vs {tuple(self.n_initial.shape)}"
+                )
             self.register_buffer("s_initial", initial_s.to(device).float())
 
         mask_np = np.asarray(mask_image.array, dtype=float)
@@ -122,6 +133,16 @@ class HemoInvasion3D(PDESystemModel3D):
         comp = torch.as_tensor(mask_np, dtype=torch.float32).clamp(0.0, 1.0)
         self.register_buffer("comp_mask", (comp > 0).float().to(device))
         self.spacing = mask_image.spacing
+        _nin = float((self.n_initial * self.comp_mask).sum())
+        _nsum = float(self.n_initial.sum())
+        if _nsum > 1e-6 and _nin < 1e-4 * _nsum:
+            warnings.warn(
+                "Initial tumor mass is almost entirely outside the anatomical mask "
+                "(n_initial * comp_mask is tiny vs n_initial sum). "
+                "Check mask / cellularity alignment after crop.",
+                UserWarning,
+                stacklevel=2,
+            )
         self._prepare_fd_stencils()
 
         if vessel_mask is not None:
@@ -179,12 +200,7 @@ class HemoInvasion3D(PDESystemModel3D):
 
     @torch.enable_grad()
     def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        if u.dim() == 5:
-            raise NotImplementedError(
-                "HemoInvasion3D supports (3, D, H, W) state only, not batched."
-            )
-        if u.dim() != 4:
-            raise ValueError(f"Expected u of shape (3, D, H, W); got {tuple(u.shape)}")
+        self.validate_state_shape(u, allow_batch=False)
         n, m, s = u[0], u[1], u[2]
         n = torch.clamp(torch.nan_to_num(n, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
         m = torch.clamp(torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0), min=0.0, max=1.0)
@@ -229,8 +245,7 @@ class HemoInvasion3D(PDESystemModel3D):
         if self.progress_bar is not None:
             self.progress_bar.update(dt.item())
 
-        if u.dim() != 4:
-            raise ValueError(f"callback_step expects shape (3, D, H, W); got {tuple(u.shape)}")
+        self.validate_state_shape(u, allow_batch=False)
 
         tissue = self.comp_mask.to(device=u.device, dtype=u.dtype)
         n, m, s = u[0], u[1], u[2]

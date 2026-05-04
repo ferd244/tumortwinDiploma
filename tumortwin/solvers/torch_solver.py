@@ -99,6 +99,77 @@ class TorchDiffEqSolver(ForwardSolver):
         )
         return t, u
 
+    @staticmethod
+    def _schedule_time_to_days(
+        event_time,
+        *,
+        t_initial: datetime,
+        model_name: str,
+        schedule_name: str,
+    ) -> float:
+        """
+        Convert one schedule timepoint to solver day units.
+
+        Accepts:
+            - numeric day values (int/float/tensors that cast to float)
+            - ``datetime`` values (requires ``t_initial``)
+        """
+        if isinstance(event_time, datetime):
+            if t_initial is None:
+                raise ValueError(
+                    f"{model_name}.{schedule_name} contains datetime values but "
+                    "model.t_initial is None. Set model.t_initial to the simulation start."
+                )
+            return timedelta_to_days(event_time - t_initial)
+        try:
+            return float(event_time)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"Unsupported timepoint type in {model_name}.{schedule_name}: "
+                f"{type(event_time)!r}. Use datetime or numeric day values."
+            ) from exc
+
+    def _extract_treatment_days(self, start_time, end_time) -> Tuple[List[float], List[float]]:
+        """
+        Collect treatment event days in (start_time, end_time).
+
+        Uses attribute-safe access so PDE-system models without treatment metadata
+        still work with the same solver/grid constructor.
+        """
+        model = self.model
+        model_name = model.__class__.__name__
+        t_initial = getattr(model, "t_initial", None)
+
+        radiotherapy_days: List[float] = []
+        rt_spec = getattr(model, "radiotherapy_specification", None)
+        if rt_spec is not None:
+            rt_times = list(getattr(rt_spec, "times", []))
+            for t_event in rt_times:
+                day = self._schedule_time_to_days(
+                    t_event,
+                    t_initial=t_initial,
+                    model_name=model_name,
+                    schedule_name="radiotherapy_specification.times",
+                )
+                if start_time < day < end_time:
+                    radiotherapy_days.append(day)
+
+        chemotherapy_days: List[float] = []
+        chemo_specs = getattr(model, "chemotherapy_specifications", None) or []
+        for spec in chemo_specs:
+            spec_times = list(getattr(spec, "times", []))
+            for t_event in spec_times:
+                day = self._schedule_time_to_days(
+                    t_event,
+                    t_initial=t_initial,
+                    model_name=model_name,
+                    schedule_name="chemotherapy_specifications[].times",
+                )
+                if start_time < day < end_time:
+                    chemotherapy_days.append(day)
+
+        return radiotherapy_days, chemotherapy_days
+
     def grid_constructor(self, func, y0, t) -> torch.Tensor:
         """
         Constructs a grid of timesteps considering treatment schedules.
@@ -131,33 +202,14 @@ class TorchDiffEqSolver(ForwardSolver):
         )
         solver_times[-1] = end_time
 
-        radiotherapy_times = torch.tensor(
-            (
-                [
-                    timedelta_to_days(x - self.model.t_initial)
-                    for x in self.model.radiotherapy_specification.times
-                    if timedelta_to_days(x - self.model.t_initial) < end_time
-                    and timedelta_to_days(x - self.model.t_initial) > start_time
-                ]
-                if self.model.radiotherapy_specification is not None
-                else []
-            ),
-            device=self.solver_options.device,
+        radiotherapy_days, chemotherapy_days = self._extract_treatment_days(
+            start_time, end_time
         )
-
+        radiotherapy_times = torch.tensor(
+            radiotherapy_days, dtype=t.dtype, device=self.solver_options.device
+        )
         chemotherapy_times = torch.tensor(
-            (
-                [
-                    timedelta_to_days(x - self.model.t_initial)
-                    for spec in self.model.chemotherapy_specifications
-                    for x in spec.times
-                    if timedelta_to_days(x - self.model.t_initial) < end_time
-                    and timedelta_to_days(x - self.model.t_initial) > start_time
-                ]
-                if self.model.chemotherapy_specifications is not None
-                else []
-            ),
-            device=self.solver_options.device,
+            chemotherapy_days, dtype=t.dtype, device=self.solver_options.device
         )
 
         # Merge all times and refine with steps

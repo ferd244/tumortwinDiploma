@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 from tumortwin.models.hemo_invasion_3d import HemoInvasion3D
+from tumortwin.models.base import TumorGrowthModel3D
 from tumortwin.models.pde_system import extract_trajectory_component
 from tumortwin.solvers.torch_solver import TorchDiffEqSolver, TorchDiffEqSolverOptions
 from tumortwin.types.imaging import NibabelNifti
@@ -72,3 +74,34 @@ def test_torch_solver_short_run_hemo(tiny_hemo_model):
     n_series = extract_trajectory_component(u_traj, 0)
     assert n_series.shape == (2,) + shape
     assert torch.isfinite(n_series).all()
+
+
+class _NoTreatmentModel(TumorGrowthModel3D):
+    """Minimal model intentionally missing treatment metadata attrs."""
+
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.rate = nn.Parameter(torch.tensor(0.1, dtype=torch.float32), requires_grad=False)
+
+    def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        return -self.rate * u
+
+
+def test_solver_grid_constructor_without_treatment_attributes():
+    model = _NoTreatmentModel()
+    solver = TorchDiffEqSolver(
+        model,
+        TorchDiffEqSolverOptions(
+            step_size=timedelta(days=0.5),
+            method="rk4",
+            device=torch.device("cpu"),
+            use_adjoint=False,
+        ),
+    )
+    t0 = datetime(2020, 1, 1)
+    timepoints = [t0, t0 + timedelta(days=2.0)]
+    u0 = torch.ones((4, 4, 4), dtype=torch.float32)
+    _, u_traj = solver.solve(timepoints, u0)
+    assert u_traj.shape[0] == 2
+    assert torch.isfinite(u_traj).all()
