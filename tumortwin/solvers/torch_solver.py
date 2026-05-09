@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import tqdm.auto as tqdm
@@ -10,6 +10,8 @@ from tumortwin.models.base import TumorGrowthModel3D
 from tumortwin.solvers.base import ForwardSolver
 from tumortwin.utils import days_since_first, timedelta_to_days
 
+_ADAPTIVE_METHODS = {"dopri5", "dopri8", "adaptive_heun", "bosh3", "fehlberg2"}
+
 
 @dataclass
 class TorchDiffEqSolverOptions:
@@ -17,16 +19,22 @@ class TorchDiffEqSolverOptions:
     Configuration options for the TorchDiffEqSolver.
 
     Attributes:
-        step_size (timedelta): The integration step size for the solver.
-        method (str): The ODE solver method to use (e.g., "rk4", "dopri5").
-        device (torch.device): The device on which to perform computations (e.g., CPU or GPU).
-        use_adjoint (bool): Whether to use the adjoint method for memory-efficient backpropagation.
+        step_size (timedelta): Integration step size for fixed-step methods (rk4, euler).
+            Ignored for adaptive methods.
+        method (str): ODE solver method. Fixed-step: "rk4", "euler", "midpoint".
+            Adaptive: "dopri5", "dopri8", "adaptive_heun", "bosh3".
+        device (torch.device): Compute device (CPU / CUDA).
+        use_adjoint (bool): Use adjoint method for memory-efficient backpropagation.
+        rtol (float): Relative tolerance for adaptive solvers. Ignored for fixed-step.
+        atol (float): Absolute tolerance for adaptive solvers. Ignored for fixed-step.
     """
 
     step_size: timedelta = timedelta(days=2.0)
     method: str = "rk4"
     device: torch.device = torch.device("cpu")
     use_adjoint: bool = True
+    rtol: float = 1e-3
+    atol: float = 1e-5
 
 
 class TorchDiffEqSolver(ForwardSolver):
@@ -76,27 +84,46 @@ class TorchDiffEqSolver(ForwardSolver):
             ``tumortwin.models.extract_trajectory_component(u, component_idx=0)``.
         """
         self.solver_options.device = self.model.device
+        opts = self.solver_options
+        is_adaptive = opts.method in _ADAPTIVE_METHODS
 
+        total_days = days_since_first(timepoints[-1], timepoints[0])
+        step_str = (
+            f"adaptive ({opts.method})"
+            if is_adaptive
+            else f"{timedelta_to_days(opts.step_size):.2f} days"
+        )
         self.model.progress_bar = tqdm.tqdm(
-            total=days_since_first(timepoints[-1], timepoints[0]),
-            desc=f"Forward Simulation: [{timepoints[0]} to {timepoints[-1]} with timestep {timedelta_to_days(self.solver_options.step_size):.2f} days]",
+            total=total_days,
+            desc=f"Forward Simulation: [{timepoints[0]} to {timepoints[-1]} with timestep {step_str}]",
             bar_format="{desc}: {percentage:3.0f}%|{bar}| {n:.1f}/{total:.1f} days elapsed",
         )
 
         t = torch.tensor(
-            [days_since_first(t, timepoints[0]) for t in timepoints],
-            device=self.solver_options.device,
+            [days_since_first(tp, timepoints[0]) for tp in timepoints],
+            device=opts.device,
         )
 
-        u_initial = u_initial.to(self.solver_options.device)
-        integrator = odeint_adjoint if self.solver_options.use_adjoint else odeint
-        u = integrator(
-            self.model,
-            u_initial,
-            t,
-            method=self.solver_options.method,
-            options={"grid_constructor": self.grid_constructor},
-        )
+        u_initial = u_initial.to(opts.device)
+        integrator = odeint_adjoint if opts.use_adjoint else odeint
+
+        if is_adaptive:
+            u = integrator(
+                self.model,
+                u_initial,
+                t,
+                method=opts.method,
+                rtol=opts.rtol,
+                atol=opts.atol,
+            )
+        else:
+            u = integrator(
+                self.model,
+                u_initial,
+                t,
+                method=opts.method,
+                options={"grid_constructor": self.grid_constructor},
+            )
         return t, u
 
     @staticmethod
