@@ -243,7 +243,10 @@ class HemoInvasion3D(PDESystemModel3D):
 
     def callback_step(self, t, u, dt):
         if self.progress_bar is not None:
-            self.progress_bar.update(dt.item())
+            try:
+                self.progress_bar.update(dt.item())
+            except (TypeError, AttributeError):
+                pass
 
         self.validate_state_shape(u, allow_batch=False)
 
