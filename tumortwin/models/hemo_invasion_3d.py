@@ -343,6 +343,7 @@ class HemoInvasion3D(PDESystemModel3D):
               if delta > 0:
                 self.progress_bar.update(delta)
             except (TypeError, AttributeError, ValueError):
+                pass
 
         self.validate_state_shape(u, allow_batch=False)
 
