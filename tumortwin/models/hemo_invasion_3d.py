@@ -197,8 +197,10 @@ class HemoInvasion3D(PDESystemModel3D):
                 raise ValueError(
                     "initial_time must be provided when radiotherapy_specification is set."
                 )
+            # Use total fractional days (matching timedelta_to_days used in the solver)
+            # so that adaptive-solver segment boundaries align with these keys.
             self.radiotherapy_days: dict = {
-                float((day - initial_time).days): dose
+                (day - initial_time).total_seconds() / 86400.0: dose
                 for day, dose in radiotherapy_specification.protocol.items()
             }
         else:
@@ -332,19 +334,27 @@ class HemoInvasion3D(PDESystemModel3D):
         )
         return out / self.time_scale_days
 
+    def _find_rt_dose(self, t: torch.Tensor, tol: float = 0.01) -> Optional[float]:
+        """
+        Return the RT dose for time t (days) if an event is within `tol` days,
+        else None.  Tolerance comparison avoids exact-float mismatches between
+        the solver grid and the protocol dict keys.
+        """
+        if self.radiotherapy_specification is None:
+            return None
+        t_day = float(t)
+        for key, dose in self.radiotherapy_days.items():
+            if abs(key - t_day) <= tol:
+                return dose
+        return None
+
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
 
     def callback_step(self, t, u, dt):
         if self.progress_bar is not None:
-            try:
-                new_n = int(t.item() + dt.item())
-                delta = new_n - int(self.progress_bar.n)
-                if delta > 0:
-                    self.progress_bar.update(delta)
-            except (TypeError, AttributeError, ValueError):
-                pass
+            self.progress_bar.update(dt.item())
 
         self.validate_state_shape(u, allow_batch=False)
 
@@ -363,10 +373,10 @@ class HemoInvasion3D(PDESystemModel3D):
             s[self.vessel_mask.to(s.device)] = self.s_vessel.to(s.device)
 
         # --- Radiotherapy: instantaneous cell kill (linear-quadratic model) ---
-        if self.radiotherapy_specification is not None and float(t) in self.radiotherapy_days:
+        rt_dose = self._find_rt_dose(t)
+        if rt_dose is not None:
             sf = compute_radiotherapy_cell_survival_fraction(
-                self.radiotherapy_specification,
-                self.radiotherapy_days[float(t)],
+                self.radiotherapy_specification, rt_dose
             )
             n = n * sf
             m = m * sf
@@ -402,14 +412,14 @@ class HemoInvasion3D(PDESystemModel3D):
                 adj_y[:, c].mul_(mask)
 
         # RT adjoint: multiply adjoint of n (c=0) and m (c=1) by survival fraction
-        if self.radiotherapy_specification is not None and float(t) in self.radiotherapy_days:
+        rt_dose = self._find_rt_dose(t)
+        if rt_dose is not None:
             sf = compute_radiotherapy_cell_survival_fraction(
-                self.radiotherapy_specification,
-                self.radiotherapy_days[float(t)],
+                self.radiotherapy_specification, rt_dose
             )
             if adj_y.dim() == 4:
-                adj_y[0].mul_(sf)   # adjoint of n
-                adj_y[1].mul_(sf)   # adjoint of m
+                adj_y[0].mul_(sf)
+                adj_y[1].mul_(sf)
             elif adj_y.dim() == 5:
                 adj_y[:, 0].mul_(sf)
                 adj_y[:, 1].mul_(sf)
