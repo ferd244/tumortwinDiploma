@@ -95,8 +95,8 @@ class TorchDiffEqSolver(ForwardSolver):
         )
         self.model.progress_bar = tqdm.tqdm(
             total=total_days,
-            desc=f"Forward Simulation: [{timepoints[0]} to {timepoints[-1]} with timestep {step_str}]",
-            unit="day",
+            desc=f"Forward Simulation [{step_str}]",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f} days",
         )
 
         t = torch.tensor(
