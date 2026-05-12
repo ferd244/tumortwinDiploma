@@ -406,7 +406,7 @@ class HemoInvasion3D(PDESystemModel3D):
             (chain rule for the instantaneous multiplicative kill applied in forward).
         """
         mask = self.comp_mask.to(device=u[2].device, dtype=torch.bool)
-        adj_y = u[2]
+        adj_y = u[1]
 
         # Apply tissue mask to all adjoint components
         if adj_y.dim() == 4:
