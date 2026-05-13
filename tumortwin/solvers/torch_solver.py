@@ -10,7 +10,19 @@ from tumortwin.models.base import TumorGrowthModel3D
 from tumortwin.solvers.base import ForwardSolver
 from tumortwin.utils import days_since_first, timedelta_to_days
 
-_ADAPTIVE_METHODS = {"dopri5", "dopri8", "adaptive_heun", "bosh3", "fehlberg2"}
+# torchdiffeq: ``grid_constructor`` (fixed-step) vs ``step_t`` / ``jump_t`` (adaptive RK).
+# ``TorchDiffEqSolver`` maps the same temporal grid (step_size + treatments) to the
+# correct option for each family so callbacks and discrete treatment days are honored.
+ADAPTIVE_TORCHDIFFEQ_METHODS = frozenset(
+    {
+        "dopri5",
+        "dopri8",
+        "tsit5",
+        "bosh3",
+        "fehlberg2",
+        "adaptive_heun",
+    }
+)
 
 
 @dataclass
@@ -19,22 +31,29 @@ class TorchDiffEqSolverOptions:
     Configuration options for the TorchDiffEqSolver.
 
     Attributes:
-        step_size (timedelta): Integration step size for fixed-step methods (rk4, euler).
-            Ignored for adaptive methods.
-        method (str): ODE solver method. Fixed-step: "rk4", "euler", "midpoint".
-            Adaptive: "dopri5", "dopri8", "adaptive_heun", "bosh3".
-        device (torch.device): Compute device (CPU / CUDA).
-        use_adjoint (bool): Use adjoint method for memory-efficient backpropagation.
-        rtol (float): Relative tolerance for adaptive solvers. Ignored for fixed-step.
-        atol (float): Absolute tolerance for adaptive solvers. Ignored for fixed-step.
+        step_size (timedelta): For **fixed-step** methods (e.g. ``rk4``), the integrator step.
+            For **adaptive** methods (e.g. ``dopri5``), the spacing of mandatory internal
+            nodes: the same merged grid as for fixed-step (uniform spacing up to this size,
+            plus radiotherapy/chemotherapy times) is passed as ``step_t``; the solver may use
+            smaller internal steps according to ``rtol`` / ``atol``.
+        method (str): The ODE solver method to use (e.g., ``rk4``, ``dopri5``); see
+            ``torchdiffeq`` for supported names.
+        device (torch.device): The device on which to perform computations (e.g., CPU or GPU).
+        use_adjoint (bool): Whether to use the adjoint method for memory-efficient backpropagation.
+        rtol (float): Relative tolerance for **adaptive** solvers (passed to ``odeint``).
+        atol (float): Absolute tolerance for **adaptive** solvers (passed to ``odeint``).
+        ode_options (Optional[dict]): Extra options forwarded to the ``torchdiffeq`` integrator
+            (e.g. ``max_num_steps``, ``first_step``). Do not set ``grid_constructor`` here for
+            adaptive methods or ``step_t`` here for fixed-step methods; the solver supplies those.
     """
 
     step_size: timedelta = timedelta(days=2.0)
     method: str = "rk4"
     device: torch.device = torch.device("cpu")
     use_adjoint: bool = True
-    rtol: float = 1e-3
-    atol: float = 1e-5
+    rtol: float = 1e-5
+    atol: float = 1e-7
+    ode_options: Optional[dict] = None
 
 
 class TorchDiffEqSolver(ForwardSolver):
@@ -43,6 +62,11 @@ class TorchDiffEqSolver(ForwardSolver):
 
     This solver integrates tumor growth models over specified timepoints
     using advanced ODE solvers and handles both radiotherapy and chemotherapy schedules.
+
+    Fixed-step methods (e.g. ``rk4``) receive a ``grid_constructor`` that merges ``step_size``
+    with treatment times. Adaptive methods (see :data:`ADAPTIVE_TORCHDIFFEQ_METHODS`, e.g.
+    ``dopri5``) receive the same mesh as ``step_t`` so discrete ``callback_step`` logic and
+    tolerances (:attr:`TorchDiffEqSolverOptions.rtol`, ``atol``) work as intended.
 
     Attributes:
         model (TumorGrowthModel3D): The tumor growth model to solve.
@@ -61,6 +85,29 @@ class TorchDiffEqSolver(ForwardSolver):
         """
         self.model = model
         self.solver_options = solver_options
+
+    @staticmethod
+    def _interior_grid_times(t: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+        """Times strictly between integration endpoints (works for increasing or decreasing ``t``)."""
+        t_lo = torch.minimum(t[0], t[-1])
+        t_hi = torch.maximum(t[0], t[-1])
+        mask = (grid > t_lo) & (grid < t_hi)
+        return grid[mask]
+
+    def _odeint_options(self, u_initial: torch.Tensor, t: torch.Tensor) -> dict:
+        method = self.solver_options.method
+        opts = dict(self.solver_options.ode_options or {})
+        if method in ADAPTIVE_TORCHDIFFEQ_METHODS:
+            opts.pop("grid_constructor", None)
+            grid = self.grid_constructor(self.model, u_initial, t)
+            step_t = self._interior_grid_times(t, grid)
+            if step_t.numel() > 0:
+                opts["step_t"] = step_t.to(device=t.device, dtype=t.dtype)
+            return opts
+        opts.pop("step_t", None)
+        opts.pop("jump_t", None)
+        opts["grid_constructor"] = self.grid_constructor
+        return opts
 
     def solve(
         self, timepoints: List[datetime], u_initial: torch.Tensor
@@ -85,7 +132,7 @@ class TorchDiffEqSolver(ForwardSolver):
         """
         self.solver_options.device = self.model.device
         opts = self.solver_options
-        is_adaptive = opts.method in _ADAPTIVE_METHODS
+        is_adaptive = opts.method in ADAPTIVE_TORCHDIFFEQ_METHODS
 
         total_days = days_since_first(timepoints[-1], timepoints[0])
         step_str = (
@@ -107,24 +154,15 @@ class TorchDiffEqSolver(ForwardSolver):
 
         u_initial = u_initial.to(opts.device)
         integrator = odeint_adjoint if opts.use_adjoint else odeint
-
-        if is_adaptive:
-            u = integrator(
-                self.model,
-                u_initial,
-                t,
-                method=opts.method,
-                rtol=opts.rtol,
-                atol=opts.atol,
-            )
-        else:
-            u = integrator(
-                self.model,
-                u_initial,
-                t,
-                method=opts.method,
-                options={"grid_constructor": self.grid_constructor},
-            )
+        u = integrator(
+            self.model,
+            u_initial,
+            t,
+            rtol=opts.rtol,
+            atol=opts.atol,
+            method=opts.method,
+            options=self._odeint_options(u_initial, t),
+        )
         return t, u
 
     @staticmethod
