@@ -116,6 +116,7 @@ class TorchDiffEqSolver(ForwardSolver):
                 method=opts.method,
                 rtol=opts.rtol,
                 atol=opts.atol,
+                max_step=timedelta_to_days(opts.step_size)
             )
         else:
             u = integrator(
