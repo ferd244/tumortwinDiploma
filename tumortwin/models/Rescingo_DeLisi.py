@@ -143,7 +143,7 @@ class ImmuneTumorModel(TumorGrowthModel3D):
 
     def _apply_treatments(self, t: torch.Tensor, x: torch.Tensor, y: torch.Tensor):
         """Применяет эффекты радио- и химиотерапии."""
-        t_float = float(t)
+        t_float = t.detach().item()
         # Радиотерапия
         if t_float in self.radiotherapy_days:
             sf = compute_radiotherapy_cell_survival_fraction(
