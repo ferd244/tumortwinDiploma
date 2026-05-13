@@ -45,6 +45,8 @@ Treatment effects are handled entirely within the `TumorGrowthModel`. Treatments
 ## Experimenting with different `Solver` algorithms
 We provide an interface to the [`torchdiffeq`](https://github.com/rtqichen/torchdiffeq) library via the [`TorchDiffEqSolver`](https://github.com/OncologyModelingGroup/TumorTwin/blob/36c21b45b526cd506d3421b509af813e1357b473/tumortwin/solvers/torch_solver.py#L32) object. This allows you to use any of the solvers and solver options supported by `torchdiffeq` (see documentation [here](https://github.com/rtqichen/torchdiffeq/blob/master/FURTHER_DOCUMENTATION.md#further-documentation))).
 
+**Adaptive methods (e.g. `dopri5`):** `torchdiffeq` does not use `grid_constructor` for these solvers; our `TorchDiffEqSolver` instead builds the same time grid as for `rk4` (based on `step_size` and treatment schedules) and passes it as `step_t`, so `callback_step` still runs on radiotherapy/chemotherapy days. Tune accuracy with `TorchDiffEqSolverOptions.rtol` and `.atol`; optional integrator knobs (e.g. `max_num_steps`) go in `ode_options`.
+
 If you wish to implement your own solver, you may wish to create a subclass of the `ForwardSolver` class and implement the `solve()` method.
 
 ## Experimenting with different `Optimizer` strategies

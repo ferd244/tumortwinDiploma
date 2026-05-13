@@ -131,27 +131,37 @@ class TorchDiffEqSolver(ForwardSolver):
             ``tumortwin.models.extract_trajectory_component(u, component_idx=0)``.
         """
         self.solver_options.device = self.model.device
+        opts = self.solver_options
+        is_adaptive = opts.method in ADAPTIVE_TORCHDIFFEQ_METHODS
 
+        total_days = days_since_first(timepoints[-1], timepoints[0])
+        step_str = (
+            f"adaptive ({opts.method})"
+            if is_adaptive
+            else f"{timedelta_to_days(opts.step_size):.2f} days"
+        )
         self.model.progress_bar = tqdm.tqdm(
-            total=days_since_first(timepoints[-1], timepoints[0]),
-            desc=f"Forward Simulation: [{timepoints[0]} to {timepoints[-1]} with timestep {timedelta_to_days(self.solver_options.step_size):.2f} days]",
-            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n:.1f}/{total:.1f} days elapsed",
+            total=round(total_days),
+            desc=f"Simulation [{step_str}]: [{timepoints[0]} to {timepoints[-1]}]",
+            unit="day",
+            miniters=1,
+            bar_format="{desc} {percentage:3.0f}%|{bar}| {n:.1f}/{total:.1f} days elapsed",
         )
 
         t = torch.tensor(
-            [days_since_first(t, timepoints[0]) for t in timepoints],
-            device=self.solver_options.device,
+            [days_since_first(tp, timepoints[0]) for tp in timepoints],
+            device=opts.device,
         )
 
-        u_initial = u_initial.to(self.solver_options.device)
-        integrator = odeint_adjoint if self.solver_options.use_adjoint else odeint
+        u_initial = u_initial.to(opts.device)
+        integrator = odeint_adjoint if opts.use_adjoint else odeint
         u = integrator(
             self.model,
             u_initial,
             t,
-            rtol=self.solver_options.rtol,
-            atol=self.solver_options.atol,
-            method=self.solver_options.method,
+            rtol=opts.rtol,
+            atol=opts.atol,
+            method=opts.method,
             options=self._odeint_options(u_initial, t),
         )
         return t, u
