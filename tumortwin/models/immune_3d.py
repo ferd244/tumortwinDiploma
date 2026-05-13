@@ -180,7 +180,7 @@ class ImmuneResponse3D(PDESystemModel3D):
 
         chemotherapy_effect = (
             compute_total_cell_death_chemo(
-                self.t_initial + timedelta(days=t.item()),
+                self.t_initial + timedelta(days=t.detach().item()),
                 self.chemotherapy_specifications,
             )
             if self.chemotherapy_specifications
@@ -247,8 +247,8 @@ class ImmuneResponse3D(PDESystemModel3D):
         Шаг после интегратора (torchdiffeq): радиотерапия, маска, клиппинг.
         """
         if self.progress_bar:
-            self.progress_bar.update(dt.item())
-        t_float = float(t)
+            self.progress_bar.update(dt.detach().item())
+        t_float = t.detach().item()
         if (
             self.radiotherapy_specification is not None
             and t_float in self.radiotherapy_days
@@ -282,13 +282,14 @@ class ImmuneResponse3D(PDESystemModel3D):
         Adjoint callback (torchdiffeq): ``u`` — кортеж расширенного состояния
         ``(vjp_t, y, adj_y, *vjp_params)``; согласован с ``ReactionDiffusion3D.callback_step_adjoint``.
         """
+        t_days = t.detach().item()
         if (
             self.radiotherapy_specification is not None
-            and float(t) in self.radiotherapy_days
+            and t_days in self.radiotherapy_days
         ):
             survival = compute_radiotherapy_cell_survival_fraction(
                 self.radiotherapy_specification,
-                self.radiotherapy_days[float(t)],
+                self.radiotherapy_days[t_days],
             )
             u[2].mul_(survival)
 

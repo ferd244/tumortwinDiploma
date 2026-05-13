@@ -153,7 +153,7 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
             )
         chemotherapy_effect = (
             compute_total_cell_death_chemo(
-                self.t_initial + timedelta(days=t.item()),
+                self.t_initial + timedelta(days=t.detach().item()),
                 self.chemotherapy_specifications,
             )
             if self.chemotherapy_specifications
@@ -189,18 +189,19 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         """
         if self.progress_bar is not None:
             try:
-                new_n = int(t.item() + dt.item())
+                new_n = int(t.detach().item() + dt.detach().item())
                 delta = new_n - int(self.progress_bar.n)
                 if delta > 0:
                     self.progress_bar.update(delta)
             except (TypeError, AttributeError, ValueError):
                 pass
+        t_days = t.detach().item()
         if (
             self.radiotherapy_specification is not None
-            and float(t) in self.radiotherapy_days
+            and t_days in self.radiotherapy_days
         ):
             u *= compute_radiotherapy_cell_survival_fraction(
-                self.radiotherapy_specification, self.radiotherapy_days[float(t)]
+                self.radiotherapy_specification, self.radiotherapy_days[t_days]
             )
         # Zero out tumor density outside the brain mask
         u[self.comp_mask == 0] = 0.0
@@ -223,13 +224,14 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         Returns:
             u (torch.Tensor): Updated adjoint variables.
         """
+        t_days = t.detach().item()
         if (
             self.radiotherapy_specification is not None
-            and float(t) in self.radiotherapy_days
+            and t_days in self.radiotherapy_days
         ):
 
             RT_effect = compute_radiotherapy_cell_survival_fraction(
-                self.radiotherapy_specification, self.radiotherapy_days[float(t)]
+                self.radiotherapy_specification, self.radiotherapy_days[t_days]
             )
             u_adj = u[2]
             u_adj *= RT_effect
