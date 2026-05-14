@@ -139,6 +139,17 @@ class LMoptimizer:
 
             x[i] = torch.clamp(x[i], min=lb, max=ub)
 
+    def _eval_model(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluate ``model(x)`` without building an autograd graph.
+
+        LM uses finite-difference Jacobians only. Each Jacobian column repeats a full
+        forward solve; retaining ODE/adjoint graphs on every call commonly exhausts RAM
+        and terminates the Jupyter kernel with no traceback.
+        """
+        with torch.inference_mode():
+            return self.model(x)
+
     def step(self) -> None:
         """Executes a single iteration of the Levenberg-Marquardt optimization process."""
         if self._n_iters == 0:
@@ -157,13 +168,13 @@ class LMoptimizer:
         # After iteration, accept step if improvement is significant
         self._accept_step_if_improved()
 
-        # Storing current best solution
-        self.parameters.append(self.best_x)
+        # Storing current best solution (clone so the history list is stable)
+        self.parameters.append(self.best_x.clone())
         self.error.append(self._y_error_best.item())
 
     def _initialize_first_iteration(self) -> None:
         """Initializes the optimization for the first iteration, including the Jacobian and error."""
-        self._y_next = self.model(self.x)
+        self._y_next = self._eval_model(self.x)
         self._best_y = self._y_next
         self.y = self._y_next.reshape(-1).to(dtype=torch.float64)
         self.J = self._get_jacobian()
@@ -238,7 +249,7 @@ class LMoptimizer:
         """
         self._x_next = self.x + self._deltas
         self._bound_inputs(self._x_next)
-        self._y_next = self.model(self._x_next).reshape(-1).to(dtype=torch.float64)
+        self._y_next = self._eval_model(self._x_next).reshape(-1).to(dtype=torch.float64)
         self._n_function_calls += 1
         self._y_next_error = self.get_error(self._y_next, self.y_data)
         self.error_record.append(self._y_next_error.item())
@@ -283,7 +294,7 @@ class LMoptimizer:
         x = self.x.clone()
         delta = self.options.jac_delta
         x[i] += delta
-        deltaY = self.model(x).reshape(-1).to(dtype=torch.float64)
+        deltaY = self._eval_model(x).reshape(-1).to(dtype=torch.float64)
         jac_delta = float(self.options.jac_delta.item())
         return (deltaY - self.y) / jac_delta
 
