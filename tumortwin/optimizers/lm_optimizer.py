@@ -90,8 +90,10 @@ class LMoptimizer:
 
         """
         self.model = model
-        self.bounds = bounds
-        self.x = initial_guess.clone()
+        # LM uses float64 parameter vectors and H, J in double; mixing float32 x + float64
+        # lstsq/J·Δ silently loses precision and FD Jacobians can look identically zero.
+        self.bounds = bounds.to(dtype=torch.float64, device=initial_guess.device)
+        self.x = initial_guess.clone().to(dtype=torch.float64)
         self.x0 = self.x.clone()
         self.best_x = self.x.clone()
         # LM builds J in float64; keep targets in the same dtype to avoid matmul dtype errors.
@@ -255,9 +257,15 @@ class LMoptimizer:
         self.error_record.append(self._y_next_error.item())
         self._n_iters += 1
 
-        if self._metric() > self.options.accept_thresh:
+        # Accept when error reduction exceeds accept_thresh; noise_floor avoids rejecting a
+        # minuscule improvement that is equal in float64 (strict `>` alone may never fire).
+        best_e = float(self._y_error_best.item())
+        next_e = float(self._y_next_error.item())
+        thresh = float(self.options.accept_thresh.item())
+        noise_floor = 1e-12 * max(1.0, abs(best_e))
+        if (best_e - next_e) > thresh - noise_floor:
             self._best_y = self._y_next
-            self.best_x = self._x_next
+            self.best_x = self._x_next.clone()
             self._accepted_step = True
             self._y_error_best = self._y_next_error
 
@@ -281,6 +289,13 @@ class LMoptimizer:
                 [self._jacobian_single_var(i) for i in range(self.x.size(0))]
             ).mT
 
+    def _finite_diff_step(self, i: int) -> float:
+        """Absolute perturbation for parameter ``i`` (must match scale of |x_i|)."""
+        base = float(self.options.jac_delta.item())
+        xi = float(self.x[i].item())
+        rel = 1e-5 * max(abs(xi), 1e-15)
+        return max(base, rel)
+
     def _jacobian_single_var(self, i: int) -> torch.Tensor:
         """
         Computes the partial derivative for a single variable using finite differences.
@@ -292,11 +307,10 @@ class LMoptimizer:
             torch.Tensor: Partial derivatives with respect to the i-th input.
         """
         x = self.x.clone()
-        delta = self.options.jac_delta
-        x[i] += delta
+        h = self._finite_diff_step(i)
+        x[i] = x[i] + h
         deltaY = self._eval_model(x).reshape(-1).to(dtype=torch.float64)
-        jac_delta = float(self.options.jac_delta.item())
-        return (deltaY - self.y) / jac_delta
+        return (deltaY - self.y) / h
 
     def _metric(self) -> torch.Tensor:
         """Computes the metric for deciding whether to accept a step based on the error reduction."""

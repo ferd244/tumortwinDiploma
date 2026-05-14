@@ -140,12 +140,14 @@ class TorchDiffEqSolver(ForwardSolver):
             if is_adaptive
             else f"{timedelta_to_days(opts.step_size):.2f} days"
         )
+        # Avoid total=0 (breaks some tqdm backends). Default bar_format only:
+        # custom format strings can raise in tqdm.notebook.__del__ when fields are None.
+        pb_total = max(1, round(total_days))
         self.model.progress_bar = tqdm.tqdm(
-            total=round(total_days),
+            total=pb_total,
             desc=f"Simulation [{step_str}]: [{timepoints[0]} to {timepoints[-1]}]",
             unit="day",
             miniters=1,
-            bar_format="{desc} {percentage:3.0f}%|{bar}| {n:.1f}/{total:.1f} days elapsed",
         )
 
         t = torch.tensor(
@@ -155,15 +157,24 @@ class TorchDiffEqSolver(ForwardSolver):
 
         u_initial = u_initial.to(opts.device)
         integrator = odeint_adjoint if opts.use_adjoint else odeint
-        u = integrator(
-            self.model,
-            u_initial,
-            t,
-            rtol=opts.rtol,
-            atol=opts.atol,
-            method=opts.method,
-            options=self._odeint_options(u_initial, t),
-        )
+        try:
+            u = integrator(
+                self.model,
+                u_initial,
+                t,
+                rtol=opts.rtol,
+                atol=opts.atol,
+                method=opts.method,
+                options=self._odeint_options(u_initial, t),
+            )
+        finally:
+            pb = getattr(self.model, "progress_bar", None)
+            if pb is not None:
+                try:
+                    pb.close()
+                except (TypeError, AttributeError, RuntimeError):
+                    pass
+                self.model.progress_bar = None
         return t, u
 
     @staticmethod
