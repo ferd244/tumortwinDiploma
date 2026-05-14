@@ -9,6 +9,7 @@ from .pde_system import (
     expand_mask_for_components,
     extract_state_component,
     extract_trajectory_component,
+    extract_trajectory_sum_components,
     stack_pde_components,
     unbind_components,
 )

@@ -15,7 +15,10 @@ from typing import List, Optional, Sequence, Union
 
 import torch
 
-from tumortwin.models.pde_system import extract_trajectory_component
+from tumortwin.models.pde_system import (
+    extract_trajectory_component,
+    extract_trajectory_sum_components,
+)
 
 
 def solve_tumor_channel_trajectory(
@@ -24,6 +27,7 @@ def solve_tumor_channel_trajectory(
     u_initial: torch.Tensor,
     *,
     component_idx: int = 0,
+    sum_component_indices: Optional[Sequence[int]] = None,
 ) -> torch.Tensor:
     """
     Run ``solver.solve`` and return the tumor (or chosen) component as ``(T, D, H, W)``.
@@ -35,12 +39,17 @@ def solve_tumor_channel_trajectory(
         solver: ``TorchDiffEqSolver`` (or any object with ``solve(timepoints, u_initial)``).
         timepoints: Wall-clock times passed to the integrator.
         u_initial: Stacked PDE state, e.g. ``model.get_initial_state()`` for ``ImmuneResponse3D``.
-        component_idx: ``0`` = tumor in the immune–tumor model.
+        component_idx: When ``sum_component_indices is None``: which PDE unknown (``0`` = tumor
+            in the immune–tumor model).
+        sum_component_indices: If set (e.g. ``(0, 1)`` for ``HemoInvasion3D``), return the
+            **sum** of those components at each output time (`n+m` matching ADC cellularity maps).
 
     Returns:
         Tensor of shape ``(len(timepoints), D, H, W)``.
     """
     _, trajectory = solver.solve(timepoints=list(timepoints), u_initial=u_initial)
+    if sum_component_indices is not None:
+        return extract_trajectory_sum_components(trajectory, sum_component_indices)
     return extract_trajectory_component(trajectory, component_idx)
 
 
@@ -67,6 +76,8 @@ def trajectory_component_timeseries(
 def trajectory_to_map_list(
     trajectory: torch.Tensor,
     component_idx: int = 0,
+    *,
+    sum_component_indices: Optional[Sequence[int]] = None,
 ) -> List[torch.Tensor]:
     """
     Convert a trajectory to a **list** of per-time spatial maps ``(D, H, W)``.
@@ -76,9 +87,15 @@ def trajectory_to_map_list(
 
     Args:
         trajectory: Output ``u`` from the solver (``T`` leading dimension).
-        component_idx: Component to extract when ``trajectory.ndim == 5``.
+        component_idx: Component to extract when ``trajectory.ndim == 5`` and
+            ``sum_component_indices is None``.
+        sum_component_indices: Sum these components each time step (use ``(0, 1)`` for
+            ``HemoInvasion3D`` total tumor occupancy ``n+m`` aligned with imaging).
     """
-    u = extract_trajectory_component(trajectory, component_idx)
+    if sum_component_indices is not None:
+        u = extract_trajectory_sum_components(trajectory, sum_component_indices)
+    else:
+        u = extract_trajectory_component(trajectory, component_idx)
     return [u[i].contiguous() for i in range(int(u.shape[0]))]
 
 
@@ -167,6 +184,8 @@ def fields_at_times_from_trajectory(
     trajectory: torch.Tensor,
     time_indices: Sequence[int],
     component_idx: int = 0,
+    *,
+    sum_component_indices: Optional[Sequence[int]] = None,
 ) -> List[torch.Tensor]:
     """
     Extract a list of spatial maps at selected time indices (tumor or any component).
@@ -174,9 +193,14 @@ def fields_at_times_from_trajectory(
     Args:
         trajectory: Solver output ``u``, shape ``(T, ...)``.
         time_indices: Indices along the time dimension.
-        component_idx: Component index when ``trajectory.ndim == 5``.
+        component_idx: Component index when ``trajectory.ndim == 5`` and
+            ``sum_component_indices is None``.
+        sum_component_indices: Same meaning as :func:`trajectory_to_map_list`.
     """
-    u = extract_trajectory_component(trajectory, component_idx)
+    if sum_component_indices is not None:
+        u = extract_trajectory_sum_components(trajectory, sum_component_indices)
+    else:
+        u = extract_trajectory_component(trajectory, component_idx)
     return [u[int(i)].contiguous() for i in time_indices]
 
 

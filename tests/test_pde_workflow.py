@@ -21,6 +21,25 @@ def test_trajectory_to_map_list_and_component():
     assert ts.shape == (t, d, h, w)
 
 
+def test_trajectory_to_map_list_summed_hemostyle():
+    t, c, d, h, w = 4, 3, 3, 3, 3
+    traj = torch.zeros((t, c, d, h, w), dtype=torch.float32)
+    traj[:, 0] = 0.25
+    traj[:, 1] = 0.125
+    lst = trajectory_to_map_list(traj, sum_component_indices=(0, 1))
+    assert len(lst) == t
+    assert torch.allclose(lst[0], torch.full((d, h, w), 0.375))
+
+
+def test_fields_at_times_sum_components():
+    traj = torch.zeros((4, 3, 2, 2, 2))
+    traj[:, 0] = 1.0
+    traj[:, 1] = 2.0
+    fs = fields_at_times_from_trajectory(traj, [1, 2], sum_component_indices=(0, 1))
+    assert len(fs) == 2
+    assert torch.all(fs[0] == 3.0)
+
+
 def test_initial_pde_state_from_tumor_field():
     tumor = torch.ones(3, 4, 5) * 0.2
     u = initial_pde_state_from_tumor_field(tumor, num_components=2, other_fill=0.5)

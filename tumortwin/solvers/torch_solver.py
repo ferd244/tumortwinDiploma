@@ -209,7 +209,8 @@ class TorchDiffEqSolver(ForwardSolver):
 
     def _extract_treatment_days(self, start_time, end_time) -> Tuple[List[float], List[float]]:
         """
-        Collect treatment event days in (start_time, end_time).
+        Collect treatment event days on the closed integration span
+        ``[min(start_time,end_time), max(...)]`` (with a tiny tolerance for float noise).
 
         Uses attribute-safe access so PDE-system models without treatment metadata
         still work with the same solver/grid constructor.
@@ -217,6 +218,13 @@ class TorchDiffEqSolver(ForwardSolver):
         model = self.model
         model_name = model.__class__.__name__
         t_initial = getattr(model, "t_initial", None)
+        st_f = float(start_time)
+        en_f = float(end_time)
+
+        def _in_integration_span(day: float) -> bool:
+            if st_f <= en_f:
+                return st_f - 1e-9 <= day <= en_f + 1e-9
+            return en_f - 1e-9 <= day <= st_f + 1e-9
 
         radiotherapy_days: List[float] = []
         rt_spec = getattr(model, "radiotherapy_specification", None)
@@ -229,7 +237,9 @@ class TorchDiffEqSolver(ForwardSolver):
                     model_name=model_name,
                     schedule_name="radiotherapy_specification.times",
                 )
-                if start_time < day < end_time:
+                # Inclusive endpoints: strict ``start < day < end`` dropped fractions on the
+                # first/last simulated day and any event with day index 0.
+                if _in_integration_span(day):
                     radiotherapy_days.append(day)
 
         chemotherapy_days: List[float] = []
@@ -243,7 +253,7 @@ class TorchDiffEqSolver(ForwardSolver):
                     model_name=model_name,
                     schedule_name="chemotherapy_specifications[].times",
                 )
-                if start_time < day < end_time:
+                if _in_integration_span(day):
                     chemotherapy_days.append(day)
 
         return radiotherapy_days, chemotherapy_days

@@ -11,7 +11,7 @@ With batch (optional):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Tuple
+from typing import ClassVar, Sequence, Tuple
 
 import torch
 
@@ -130,6 +130,42 @@ def extract_trajectory_component(
         return trajectory
     if trajectory.dim() == 5:
         return trajectory[:, component_idx].contiguous()
+    raise ValueError(
+        f"Expected trajectory with ndim 4 or 5, got {trajectory.dim()} {tuple(trajectory.shape)}."
+    )
+
+
+def extract_trajectory_sum_components(
+    trajectory: torch.Tensor,
+    component_indices: Sequence[int],
+) -> torch.Tensor:
+    """
+    Sum several PDE fields along the component dimension of a trajectory.
+
+    For ``HemoInvasion3D`` states stacked as proliferating ``n``, quiescent ``m``, substrate ``s``,
+    imaging-style **total tumor occupancy** aligns with passing ``component_indices=(0, 1)`` so maps
+    match ``n + m``. (Measured ADC cellularity treats the lesion as one compartment.)
+
+    Shapes:
+        - Single-field: ``(T, D, H, W)`` — only ``(0,)`` is allowed (returns the trajectory unchanged).
+        - Coupled system: ``(T, C, D, H, W)`` — returns ``sum_i trajectory[:, i]`` along component axis.
+    """
+    if trajectory.dim() == 4:
+        if tuple(component_indices) != (0,):
+            raise ValueError(
+                "Trajectory has shape (T, D, H, W); only component_indices=(0,) is supported."
+            )
+        return trajectory
+    if trajectory.dim() == 5:
+        cc = trajectory.shape[1]
+        ix = tuple(int(i) for i in component_indices)
+        for i in ix:
+            if i < 0 or i >= cc:
+                raise ValueError(
+                    f"component index {i} out of range for trajectory with C={cc} components."
+                )
+        stacked = torch.stack([trajectory[:, j] for j in ix], dim=0)
+        return stacked.sum(dim=0).contiguous()
     raise ValueError(
         f"Expected trajectory with ndim 4 or 5, got {trajectory.dim()} {tuple(trajectory.shape)}."
     )

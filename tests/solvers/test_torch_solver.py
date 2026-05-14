@@ -34,6 +34,29 @@ class _ZeroDynamicsWithRtCallback(TumorGrowthModel3D):
         return u
 
 
+class _ThreeChannelZeroDynamicsRt(TumorGrowthModel3D):
+    """
+    Stacked state ``(C, D, H, W)`` like ``HemoInvasion3D``: du/dt = 0; RT scales channels 0 and 1.
+
+    ``torchdiffeq`` discards the return value of ``callback_step``; updates must be in-place
+    (``u[0].copy_(...)`` / ``mul_``), not only ``return torch.stack(...)``.
+    """
+
+    def __init__(self, rt_hit_day: float = 1.0):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.rt_hit_day = float(rt_hit_day)
+
+    def forward(self, t: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        return torch.zeros_like(u)
+
+    def callback_step(self, t, u, dt):
+        if float(t) == self.rt_hit_day:
+            u[0].mul_(0.1)
+            u[1].mul_(0.1)
+        return u
+
+
 @pytest.mark.parametrize("method", ("rk4", "dopri5"))
 def test_adaptive_solver_hits_rt_callback_grid(method):
     """
@@ -58,6 +81,29 @@ def test_adaptive_solver_hits_rt_callback_grid(method):
     _, u_traj = solver.solve(timepoints, u0)
     # Final state should reflect RT at day 1 while du/dt = 0.
     assert torch.allclose(u_traj[-1], torch.full_like(u0, 0.1), rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("method", ("rk4", "dopri5"))
+def test_multichannel_state_rt_callback_applies_inplace(method):
+    """Regression: stacked PDE state must mutate ``u`` in-place so RT survives integration."""
+    model = _ThreeChannelZeroDynamicsRt(rt_hit_day=1.0)
+    solver = TorchDiffEqSolver(
+        model,
+        TorchDiffEqSolverOptions(
+            step_size=timedelta(days=0.5),
+            method=method,
+            device=torch.device("cpu"),
+            use_adjoint=False,
+        ),
+    )
+    t0 = datetime(2020, 1, 1)
+    timepoints = [t0, t0 + timedelta(days=3.0)]
+    u0 = torch.ones((3, 4, 4, 4), dtype=torch.float32)
+    _, u_traj = solver.solve(timepoints, u0)
+    want = torch.ones_like(u0)
+    want[0].fill_(0.1)
+    want[1].fill_(0.1)
+    assert torch.allclose(u_traj[-1], want, rtol=0, atol=1e-5)
 
 
 def test_dopri5_accepts_rtol_atol_and_ode_options():

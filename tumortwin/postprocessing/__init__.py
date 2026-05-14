@@ -2,6 +2,7 @@
 from tumortwin.models.pde_system import (
     extract_state_component,
     extract_trajectory_component,
+    extract_trajectory_sum_components,
 )
 
 from .calibration_summary import (
