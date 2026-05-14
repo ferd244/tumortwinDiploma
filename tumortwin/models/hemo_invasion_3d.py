@@ -396,7 +396,10 @@ class HemoInvasion3D(PDESystemModel3D):
             n[over] = n[over] / occ[over]
             m[over] = m[over] / occ[over]
 
-        return torch.stack([n, m, s])
+        u[0].copy_(n)
+        u[1].copy_(m)
+        u[2].copy_(s)
+        return u
 
     def callback_step_adjoint(self, t, u, dt):
         """
