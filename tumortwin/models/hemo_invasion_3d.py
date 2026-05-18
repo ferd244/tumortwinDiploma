@@ -311,7 +311,8 @@ class HemoInvasion3D(PDESystemModel3D):
         chemo_effect = None
         if self.chemotherapy_specifications and self.t_initial is not None:
             chemo_effect = compute_total_cell_death_chemo(
-                self.t_initial + timedelta(days=float(t.item())),
+                self.t_initial
+                + timedelta(days=float(t.detach().reshape(()).item())),
                 self.chemotherapy_specifications,
             )
 
@@ -345,7 +346,8 @@ class HemoInvasion3D(PDESystemModel3D):
         """
         if self.radiotherapy_specification is None:
             return None
-        t_day = float(t)
+        # Solver time may require grad; comparing to protocol keys uses plain Python float.
+        t_day = float(t.detach().reshape(()))
         for key, dose in self.radiotherapy_days.items():
             if abs(key - t_day) <= tol:
                 return dose
@@ -358,7 +360,7 @@ class HemoInvasion3D(PDESystemModel3D):
     def callback_step(self, t, u, dt):
         if self.progress_bar is not None:
             try:
-                new_n = int(t.item() + dt.item())
+                new_n = int(t.detach().item() + dt.detach().item())
                 delta = new_n - int(self.progress_bar.n)
                 if delta > 0:
                     self.progress_bar.update(delta)
