@@ -376,11 +376,15 @@ class HemoInvasion3D(PDESystemModel3D):
         m = torch.nan_to_num(m * tissue, nan=0.0, posinf=1.0, neginf=0.0)
         s = torch.nan_to_num(s * tissue, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # Boundary conditions for nutrient
+        # Boundary conditions for nutrient (functional only — in-place breaks autograd
+        # through torchdiffeq adjoint when RT / Adam calibrates learnable parameters).
         outside = tissue <= 0
-        s[outside] = self.s_outside.to(s.device)
+        s_out = self.s_outside.to(device=s.device, dtype=s.dtype)
+        s = torch.where(outside, s_out, s)
         if self.vessel_mask is not None:
-            s[self.vessel_mask.to(s.device)] = self.s_vessel.to(s.device)
+            vm = self.vessel_mask.to(device=s.device)
+            s_v = self.s_vessel.to(device=s.device, dtype=s.dtype)
+            s = torch.where(vm, s_v, s)
 
         # --- Radiotherapy: instantaneous cell kill (linear-quadratic model) ---
         rt_dose = self._find_rt_dose(t)
@@ -397,9 +401,11 @@ class HemoInvasion3D(PDESystemModel3D):
         s = torch.clamp(s, min=0.0)
         occ = n + m
         over = occ > 1.0
-        if over.any():
-            n[over] = n[over] / occ[over]
-            m[over] = m[over] / occ[over]
+        inv = torch.where(
+            over, 1.0 / occ.clamp(min=1e-12), torch.ones_like(occ)
+        )
+        n = n * inv
+        m = m * inv
 
         # torchdiffeq fixed-step/adaptive callers ignore this return value and require
         # in-place mutation of ``u`` (see ReactionDiffusion3D.callback_step).
