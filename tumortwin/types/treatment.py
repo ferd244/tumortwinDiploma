@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Self, TypeAlias
+from typing import Dict, List, Self, TypeAlias, Union
 
 import numpy as np
 import torch
@@ -60,14 +60,18 @@ class RadiotherapySpecification(BaseModel):
     Defines a radiotherapy protocol, including dose schedule and biological parameters.
 
     Attributes:
-        alpha (float): Tissue-specific radiosensitivity parameter (α).
+        alpha (float | torch.Tensor): Tissue-specific radiosensitivity parameter (α).
+            Use a scalar ``torch.Tensor`` when calibrating α with autograd.
         alpha_beta_ratio (float): Tissue-specific α/β ratio.
         times (List[TreatmentTime]): Times of the treatments in the protocol.
         doses (List[float]): Doses corresponding to each treatment time.
         protocol(RadiotherapyProtocol): The complete mapping of treatment times to radiotherapy doses.
     """
 
-    alpha: float
+    class Config:
+        arbitrary_types_allowed = True
+
+    alpha: Union[float, torch.Tensor]
     alpha_beta_ratio: float
     times: List[TreatmentTime]
     doses: List[float]

@@ -27,9 +27,12 @@ def compute_radiotherapy_cell_death_fractions(
     Returns:
         Dict[TreatmentTime, float]: A dictionary mapping treatment times to cell survival fractions.
     """
+    rt_a = radiotherapy_specification.alpha
+    if isinstance(rt_a, torch.Tensor):
+        rt_a = float(rt_a.detach().cpu().item())
     beta = alpha / alpha_beta_ratio
     return {
-        day: np.exp(-radiotherapy_specification.alpha * (alpha * dose + beta * dose**2))
+        day: np.exp(-rt_a * (alpha * dose + beta * dose**2))
         for day, dose in radiotherapy_specification.protocol.items()
     }
 
