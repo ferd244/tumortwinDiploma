@@ -389,11 +389,22 @@ def adam_refine_hemo_total_cellularity(
             )
         history: List[AdamHemoInvasionRecord] = []
 
+        # --- OPTIMISATION: cache objects that never change across steps ---
+        _timepoints_list: list = list(timepoints)   # avoid re-allocation each step
+        _u0 = model.get_initial_state()             # initial state is constant; build once
+        # ------------------------------------------------------------------
+
+        import time as _time  # local import to avoid polluting module namespace
+
         for step in range(num_steps):
+            _t0 = _time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
+
+            # Re-read initial state only when model fields that define it may have
+            # changed (they don't during Adam on scalar params — safe to reuse _u0).
             _, traj = solver.solve(
-                timepoints=list(timepoints),
-                u_initial=model.get_initial_state(),
+                timepoints=_timepoints_list,
+                u_initial=_u0,
             )
             n = extract_trajectory_component(traj, 0)
             m = extract_trajectory_component(traj, 1)
@@ -435,9 +446,14 @@ def adam_refine_hemo_total_cellularity(
                     snapshot=snap,
                 )
             )
+            _elapsed = _time.perf_counter() - _t0
             if verbose and log_every > 0 and step % log_every == 0:
                 parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
-                msg = f"step {step:03d}: SSE={loss_val:.4e} | " + " ".join(parts)
+                msg = (
+                    f"step {step:03d}: SSE={loss_val:.4e} | "
+                    + " ".join(parts)
+                    + f"  [{_elapsed:.1f}s]"
+                )
                 print(msg)
 
         return history
