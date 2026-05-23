@@ -16,6 +16,12 @@ from datetime import datetime
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import torch
+import torch.nn as nn
+from torch.nn.utils.parametrize import (
+    is_parametrized,
+    register_parametrization,
+    remove_parametrizations,
+)
 
 from tumortwin.models.hemo_invasion_3d import HemoInvasion3D
 from tumortwin.models.pde_system import extract_trajectory_component
@@ -23,6 +29,7 @@ from tumortwin.models.pde_system import extract_trajectory_component
 __all__ = [
     "AdamHemoInvasionRecord",
     "HEMO_INVASION_ADAM_PARAM_NAMES",
+    "HEMO_INVASION_POSITIVE_SCALAR_NAMES",
     "adam_refine_hemo_total_cellularity",
 ]
 
@@ -30,6 +37,23 @@ __all__ = [
 HEMO_INVASION_ADAM_PARAM_NAMES: FrozenSet[str] = frozenset(
     {"B", "Dn", "Ds", "k_s", "s_star", "K", "s_crit", "s_smooth", "alpha_rt"}
 )
+
+# Strictly-positive scalars under :class:`HemoInvasion3D` suitable for θ = exp(u) calibration.
+HEMO_INVASION_POSITIVE_SCALAR_NAMES: FrozenSet[str] = frozenset(
+    {"B", "Dn", "Ds", "k_s", "s_star", "K", "s_crit", "s_smooth"}
+)
+
+
+class _PositiveExpScalarParam(nn.Module):
+    """Maps unconstrained u to exp(u); exposes u to the optimizer."""
+
+    eps: float = 1e-12
+
+    def forward(self, u: torch.Tensor) -> torch.Tensor:
+        return torch.exp(u)
+
+    def right_inverse(self, y: torch.Tensor) -> torch.Tensor:
+        return torch.log(torch.clamp(y, min=self.eps))
 
 
 @dataclass
@@ -45,13 +69,55 @@ class AdamHemoInvasionRecord:
     snapshot: Dict[str, float] = field(default_factory=dict)
 
 
-def _param_tensor(model: HemoInvasion3D, name: str) -> torch.Tensor:
+def _param_tensor(model: HemoInvasion3D, name: str) -> torch.nn.Parameter:
     if name == "alpha_rt":
         raise KeyError("alpha_rt is stored on radiotherapy_specification")
     p = getattr(model, name, None)
+    # After register_parametrization, getattr returns a Tensor forward of exp(original).
     if p is None or not isinstance(p, torch.nn.Parameter):
-        raise KeyError(f"{name!r} is not an nn.Parameter on HemoInvasion3D")
+        raise KeyError(
+            f"{name!r} is not a plain nn.Parameter on HemoInvasion3D "
+            f"(possibly parametrized: use underlying leaf accessors)."
+        )
     return p
+
+
+def _underlying_train_leaf(
+    model: HemoInvasion3D, name: str
+) -> torch.nn.Parameter:
+    """Optimizer leaf tensor (log-space unconstrained scalar if parametrized)."""
+    if is_parametrized(model, name):
+        leaf = model.parametrizations[name].original  # type: ignore[index]
+        if not isinstance(leaf, torch.nn.Parameter):
+            raise TypeError(f"parametrizations[{name!r}].original is not a Parameter")
+        return leaf
+    return _param_tensor(model, name)
+
+
+def _assign_trainable_physical(
+    model: HemoInvasion3D, name: str, val: float
+) -> None:
+    """Set a trained scalar parameter to ``val`` in physical units (handles log-space)."""
+    eps = float(_PositiveExpScalarParam.eps)
+    leaf = _underlying_train_leaf(model, name)
+    phys = torch.tensor(
+        float(val), device=leaf.device, dtype=torch.float64
+    ).clamp_min(eps)
+    with torch.no_grad():
+        if is_parametrized(model, name):
+            leaf.copy_(phys.log().to(dtype=leaf.dtype))
+        else:
+            leaf.copy_(phys.to(dtype=leaf.dtype))
+
+
+def _register_positive_log_space(model: HemoInvasion3D, name: str) -> None:
+    if name not in HEMO_INVASION_POSITIVE_SCALAR_NAMES:
+        raise ValueError(f"Cannot use log-space for {name!r}.")
+    if is_parametrized(model, name):
+        raise ValueError(
+            f"{name!r} is already parametrized; remove parametrizations first."
+        )
+    register_parametrization(model, name, _PositiveExpScalarParam(), unsafe=False)
 
 
 def _snapshot_trainable(
@@ -65,7 +131,8 @@ def _snapshot_trainable(
             if alpha_t is not None:
                 out[n] = float(alpha_t.detach().item())
         else:
-            out[n] = float(_param_tensor(model, n).detach().item())
+            # Works for plain Parameters and parametrized exp(·) views.
+            out[n] = float(getattr(model, n).detach().reshape(()).cpu().item())
     return out
 
 
@@ -100,6 +167,7 @@ def _clamp_trainable(
     k_bounds: Tuple[float, float],
     alpha_bounds: Tuple[float, float],
 ) -> None:
+    eps = float(_PositiveExpScalarParam.eps)
     rt_active = rt is not None and alpha_t is not None
     for name in names:
         bounds = _resolve_bounds(
@@ -117,6 +185,12 @@ def _clamp_trainable(
             if alpha_t is not None:
                 alpha_t.clamp_(lo, hi)
                 rt.alpha = alpha_t
+        elif is_parametrized(model, name):
+            phys = getattr(model, name).detach().reshape(())
+            clamped = phys.clamp(float(lo), float(hi)).clamp_min(eps)
+            leaf = _underlying_train_leaf(model, name)
+            with torch.no_grad():
+                leaf.copy_(torch.log(clamped.to(device=leaf.device, dtype=leaf.dtype)))
         else:
             _param_tensor(model, name).clamp_(lo, hi)
 
@@ -181,6 +255,10 @@ def adam_refine_hemo_total_cellularity(
     initial_K: Optional[float] = None,
     initial_alpha_rt: Optional[float] = None,
     fix_Dn: bool = True,
+    calibrate_log_space: bool = False,
+    adam_amsgrad: bool = False,
+    cosine_scheduler_T_max: Optional[int] = None,
+    cosine_scheduler_eta_min: float = 1e-3,
     log_every: int = 5,
     verbose: bool = True,
 ) -> List[AdamHemoInvasionRecord]:
@@ -199,6 +277,13 @@ def adam_refine_hemo_total_cellularity(
     ``K``, and ``alpha_rt`` the legacy ``*_bounds`` arguments still apply when a name
     is omitted from ``param_bounds``.
 
+    If ``calibrate_log_space=True``, each calibrated positive scalar in
+    ``HEMO_INVASION_POSITIVE_SCALAR_NAMES`` is internally re-parameterized as
+    ``physical = exp(u)``. Adam updates the unconstrained ``u`` while box constraints and
+    ``param_bounds`` stay in physical units (the same semantics as plain calibration).
+    ``alpha_rt`` is always optimized in linear space. Exp parametrizations are removed
+    when this function returns so the model exposes plain ``nn.Parameter`` fields again.
+
     Args:
         model: Hemodynamic invasion model.
         solver: Object with ``solve(timepoints=..., u_initial=...) -> (_, trajectory)``.
@@ -214,6 +299,11 @@ def adam_refine_hemo_total_cellularity(
         initial_B / initial_K / initial_alpha_rt: Legacy warm-start (merged into
             ``initial_values`` when the corresponding parameter is trained).
         fix_Dn: Legacy: when ``calibrate_params is None``, freeze ``Dn``.
+        calibrate_log_space: Reparametrize positive scalars as ``exp(u)`` for Adam on ``u``.
+        adam_amsgrad: Pass-through to ``torch.optim.Adam(..., amsgrad=...)``.
+        cosine_scheduler_T_max: If set, wraps Adam in
+            :class:`~torch.optim.lr_scheduler.CosineAnnealingLR` with this ``T_max``.
+        cosine_scheduler_eta_min: Minimum LR for cosine annealing.
         log_every: Print every this many steps if ``verbose`` (also step 0).
         verbose: Print progress lines.
 
@@ -225,110 +315,135 @@ def adam_refine_hemo_total_cellularity(
         calibrate_params, rt, fix_Dn=fix_Dn
     )
 
-    for p in model.parameters():
-        p.requires_grad_(False)
+    log_space_registered: List[str] = []
+    try:
+        if calibrate_log_space:
+            for name in train_names:
+                if name in HEMO_INVASION_POSITIVE_SCALAR_NAMES:
+                    _register_positive_log_space(model, name)
+                    log_space_registered.append(name)
 
-    alpha_t: Optional[torch.Tensor] = None
-    if rt is not None:
-        a = rt.alpha
-        if isinstance(a, torch.Tensor):
-            alpha_t = a.detach().to(device=model.B.device, dtype=model.B.dtype).reshape(())
-        else:
-            alpha_t = torch.tensor(
-                float(a), device=model.B.device, dtype=model.B.dtype
-            )
-        if "alpha_rt" in train_names:
-            alpha_t.requires_grad_(True)
-        else:
-            alpha_t.requires_grad_(False)
-        rt.alpha = alpha_t
+        for p in model.parameters():
+            p.requires_grad_(False)
 
-    for name in train_names:
-        if name == "alpha_rt":
-            continue
-        _param_tensor(model, name).requires_grad_(True)
-
-    if calibrate_params is None and fix_Dn:
-        model.Dn.requires_grad_(False)
-
-    params: List[torch.Tensor] = []
-    for name in train_names:
-        if name == "alpha_rt":
-            if alpha_t is not None:
-                params.append(alpha_t)
-        else:
-            params.append(_param_tensor(model, name))
-
-    init_map: Dict[str, float] = dict(initial_values or {})
-    if initial_B is not None:
-        init_map.setdefault("B", float(initial_B))
-    if initial_K is not None:
-        init_map.setdefault("K", float(initial_K))
-    if initial_alpha_rt is not None:
-        init_map.setdefault("alpha_rt", float(initial_alpha_rt))
-
-    with torch.no_grad():
-        for key, val in init_map.items():
-            if key not in train_names:
-                continue
-            if key == "alpha_rt":
-                if alpha_t is not None:
-                    alpha_t.fill_(float(val))
-                    if rt is not None:
-                        rt.alpha = alpha_t
+        alpha_t: Optional[torch.Tensor] = None
+        if rt is not None:
+            a = rt.alpha
+            if isinstance(a, torch.Tensor):
+                alpha_t = a.detach().to(
+                    device=model.B.device, dtype=model.B.dtype
+                ).reshape(())
             else:
-                _param_tensor(model, key).fill_(float(val))
+                alpha_t = torch.tensor(
+                    float(a), device=model.B.device, dtype=model.B.dtype
+                )
+            if "alpha_rt" in train_names:
+                alpha_t.requires_grad_(True)
+            else:
+                alpha_t.requires_grad_(False)
+            rt.alpha = alpha_t
 
-    optimizer = torch.optim.Adam(params, lr=lr)
-    history: List[AdamHemoInvasionRecord] = []
+        for name in train_names:
+            if name == "alpha_rt":
+                continue
+            _underlying_train_leaf(model, name).requires_grad_(True)
 
-    for step in range(num_steps):
-        optimizer.zero_grad(set_to_none=True)
-        _, traj = solver.solve(
-            timepoints=list(timepoints),
-            u_initial=model.get_initial_state(),
-        )
-        n = extract_trajectory_component(traj, 0)
-        m = extract_trajectory_component(traj, 1)
-        pred = torch.clamp(n + m, 0.0, 1.0)
+        if calibrate_params is None and fix_Dn:
+            _underlying_train_leaf(model, "Dn").requires_grad_(False)
 
-        loss = ((pred - y_target) ** 2).sum()
-        loss_val = float(loss.detach())
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
-        optimizer.step()
+        params: List[torch.Tensor] = []
+        for name in train_names:
+            if name == "alpha_rt":
+                if alpha_t is not None:
+                    params.append(alpha_t)
+            else:
+                params.append(_underlying_train_leaf(model, name))
+
+        init_map: Dict[str, float] = dict(initial_values or {})
+        if initial_B is not None:
+            init_map.setdefault("B", float(initial_B))
+        if initial_K is not None:
+            init_map.setdefault("K", float(initial_K))
+        if initial_alpha_rt is not None:
+            init_map.setdefault("alpha_rt", float(initial_alpha_rt))
 
         with torch.no_grad():
-            _clamp_trainable(
-                model,
-                train_names,
-                alpha_t,
-                rt,
-                param_bounds=param_bounds,
-                b_bounds=b_bounds,
-                k_bounds=k_bounds,
-                alpha_bounds=alpha_bounds,
-            )
+            for key, val in init_map.items():
+                if key not in train_names:
+                    continue
+                if key == "alpha_rt":
+                    if alpha_t is not None:
+                        alpha_t.fill_(float(val))
+                        if rt is not None:
+                            rt.alpha = alpha_t
+                else:
+                    _assign_trainable_physical(model, key, float(val))
 
-        alpha_scalar = (
-            float(alpha_t.detach().item())
-            if alpha_t is not None
-            else float("nan")
-        )
-        snap = _snapshot_trainable(model, train_names, alpha_t)
-        history.append(
-            AdamHemoInvasionRecord(
-                step=step,
-                loss=loss_val,
-                B=float(model.B.detach().item()),
-                K=float(model.K.detach().item()),
-                alpha_rt=alpha_scalar,
-                snapshot=snap,
+        optimizer = torch.optim.Adam(params, lr=lr, amsgrad=adam_amsgrad)
+        scheduler = None
+        if cosine_scheduler_T_max is not None:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=int(cosine_scheduler_T_max),
+                eta_min=float(cosine_scheduler_eta_min),
             )
-        )
-        if verbose and log_every > 0 and step % log_every == 0:
-            parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
-            msg = f"step {step:03d}: SSE={loss_val:.4e} | " + " ".join(parts)
-            print(msg)
+        history: List[AdamHemoInvasionRecord] = []
 
-    return history
+        for step in range(num_steps):
+            optimizer.zero_grad(set_to_none=True)
+            _, traj = solver.solve(
+                timepoints=list(timepoints),
+                u_initial=model.get_initial_state(),
+            )
+            n = extract_trajectory_component(traj, 0)
+            m = extract_trajectory_component(traj, 1)
+            pred = torch.clamp(n + m, 0.0, 1.0)
+
+            loss = ((pred - y_target) ** 2).sum()
+            loss_val = float(loss.detach())
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            with torch.no_grad():
+                _clamp_trainable(
+                    model,
+                    train_names,
+                    alpha_t,
+                    rt,
+                    param_bounds=param_bounds,
+                    b_bounds=b_bounds,
+                    k_bounds=k_bounds,
+                    alpha_bounds=alpha_bounds,
+                )
+
+            alpha_scalar = (
+                float(alpha_t.detach().item())
+                if alpha_t is not None
+                else float("nan")
+            )
+            snap = _snapshot_trainable(model, train_names, alpha_t)
+            history.append(
+                AdamHemoInvasionRecord(
+                    step=step,
+                    loss=loss_val,
+                    B=float(model.B.detach().reshape(()).cpu().item()),
+                    K=float(model.K.detach().reshape(()).cpu().item()),
+                    alpha_rt=alpha_scalar,
+                    snapshot=snap,
+                )
+            )
+            if verbose and log_every > 0 and step % log_every == 0:
+                parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
+                msg = f"step {step:03d}: SSE={loss_val:.4e} | " + " ".join(parts)
+                print(msg)
+
+        return history
+    finally:
+        for name in reversed(log_space_registered):
+            if is_parametrized(model, name):
+                remove_parametrizations(
+                    model, name, leave_parametrized=False
+                )
