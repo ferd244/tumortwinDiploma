@@ -247,7 +247,7 @@ def adam_refine_hemo_total_cellularity(
     initial_values: Optional[Dict[str, float]] = None,
     num_steps: int = 50,
     lr: float = 1e-3,
-    grad_clip_max_norm: float = 1.0,
+    grad_clip_max_norm: float = 10.0,
     b_bounds: Tuple[float, float] = (3.5, 4.5),
     k_bounds: Tuple[float, float] = (0.8, 1.5),
     alpha_bounds: Tuple[float, float] = (0.03, 0.09),
@@ -260,6 +260,7 @@ def adam_refine_hemo_total_cellularity(
     cosine_scheduler_T_max: Optional[int] = None,
     cosine_scheduler_eta_min: float = 1e-3,
     log_every: int = 5,
+    log_grad_norm: bool = False,
     verbose: bool = True,
 ) -> List[AdamHemoInvasionRecord]:
     """
@@ -284,27 +285,51 @@ def adam_refine_hemo_total_cellularity(
     ``alpha_rt`` is always optimized in linear space. Exp parametrizations are removed
     when this function returns so the model exposes plain ``nn.Parameter`` fields again.
 
+    .. note::
+        **Adjoint vs direct backprop.** When calibrating a small number of scalar
+        parameters (<=5), pass ``use_adjoint=False`` in
+        :class:`~tumortwin.solvers.TorchDiffEqSolverOptions`. Adjoint requires a full
+        backward ODE solve whose cost equals the forward pass -- typically 3x slower per
+        step for few parameters. Direct autograd is faster and produces cleaner gradients.
+
+    .. note::
+        **Cosine scheduler and ``num_steps``.** Setting ``cosine_scheduler_T_max`` equal
+        to ``num_steps`` halves the learning rate by the midpoint and drops it to
+        ``eta_min`` by the last step. For aggressive short runs (< 20 steps) prefer
+        either no scheduler (``cosine_scheduler_T_max=None``) or set ``T_max`` to 2-3x
+        ``num_steps`` to keep the rate high for longer.
+
     Args:
         model: Hemodynamic invasion model.
         solver: Object with ``solve(timepoints=..., u_initial=...) -> (_, trajectory)``.
+            Pass ``use_adjoint=False`` in solver options for faster per-step gradients
+            when calibrating <=5 scalar parameters.
         y_target: Tensor shaped like the predicted maps (e.g. ``(T, D, H, W)``).
         timepoints: Wall-clock times, same length as leading dim of ``y_target``.
         calibrate_params: Optional explicit list of scalar parameters to train.
         param_bounds: Optional per-name ``(low, high)`` clamps after each Adam step.
         initial_values: Optional warm-start scalars for trained parameters (by name).
         num_steps: Adam iterations.
-        lr: Learning rate.
-        grad_clip_max_norm: Global L2 norm clip for optimized tensors.
+        lr: Learning rate. Typical range 0.05-0.15 for log-space calibration.
+        grad_clip_max_norm: Global L2 norm clip applied to the parameter gradient vector
+            before the Adam step. Default 10.0 allows bold steps; lower values (e.g. 1.0)
+            severely restrict step size when the number of calibrated parameters is small
+            (max per-component gradient = clip / sqrt(n_params)). Set to float('inf') to
+            disable clipping entirely.
         b_bounds / k_bounds / alpha_bounds: Default box constraints for those names.
         initial_B / initial_K / initial_alpha_rt: Legacy warm-start (merged into
             ``initial_values`` when the corresponding parameter is trained).
         fix_Dn: Legacy: when ``calibrate_params is None``, freeze ``Dn``.
         calibrate_log_space: Reparametrize positive scalars as ``exp(u)`` for Adam on ``u``.
-        adam_amsgrad: Pass-through to ``torch.optim.Adam(..., amsgrad=...)``.
+        adam_amsgrad: Pass-through to ``torch.optim.Adam(..., amsgrad=...)``. AMSGrad is
+            more conservative; prefer ``False`` for aggressive short runs.
         cosine_scheduler_T_max: If set, wraps Adam in
             :class:`~torch.optim.lr_scheduler.CosineAnnealingLR` with this ``T_max``.
+            Set to at least 2x ``num_steps`` to avoid premature lr decay.
         cosine_scheduler_eta_min: Minimum LR for cosine annealing.
         log_every: Print every this many steps if ``verbose`` (also step 0).
+        log_grad_norm: If ``True``, print the raw gradient L2 norm before clipping.
+            Useful for diagnosing whether ``grad_clip_max_norm`` is binding.
         verbose: Print progress lines.
 
     Returns:
@@ -389,22 +414,11 @@ def adam_refine_hemo_total_cellularity(
             )
         history: List[AdamHemoInvasionRecord] = []
 
-        # --- OPTIMISATION: cache objects that never change across steps ---
-        _timepoints_list: list = list(timepoints)   # avoid re-allocation each step
-        _u0 = model.get_initial_state()             # initial state is constant; build once
-        # ------------------------------------------------------------------
-
-        import time as _time  # local import to avoid polluting module namespace
-
         for step in range(num_steps):
-            _t0 = _time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
-
-            # Re-read initial state only when model fields that define it may have
-            # changed (they don't during Adam on scalar params — safe to reuse _u0).
             _, traj = solver.solve(
-                timepoints=_timepoints_list,
-                u_initial=_u0,
+                timepoints=list(timepoints),
+                u_initial=model.get_initial_state(),
             )
             n = extract_trajectory_component(traj, 0)
             m = extract_trajectory_component(traj, 1)
@@ -412,7 +426,44 @@ def adam_refine_hemo_total_cellularity(
 
             loss = ((pred - y_target) ** 2).sum()
             loss_val = float(loss.detach())
+
+            # Snapshot and log BEFORE the update so that loss and params are
+            # consistent (both reflect the parameters used in this forward pass).
+            alpha_scalar = (
+                float(alpha_t.detach().item())
+                if alpha_t is not None
+                else float("nan")
+            )
+            snap = _snapshot_trainable(model, train_names, alpha_t)
+            history.append(
+                AdamHemoInvasionRecord(
+                    step=step,
+                    loss=loss_val,
+                    B=float(model.B.detach().reshape(()).cpu().item()),
+                    K=float(model.K.detach().reshape(()).cpu().item()),
+                    alpha_rt=alpha_scalar,
+                    snapshot=snap,
+                )
+            )
+            if verbose and log_every > 0 and step % log_every == 0:
+                parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
+                current_lr = optimizer.param_groups[0]["lr"]
+                msg = (
+                    f"step {step:03d}: SSE={loss_val:.4e} | lr={current_lr:.4g} | "
+                    + " ".join(parts)
+                )
+                print(msg)
+
             loss.backward()
+            if log_grad_norm and verbose:
+                raw_norm = torch.nn.utils.clip_grad_norm_(
+                    params, max_norm=float("inf")
+                )
+                clipped = raw_norm > grad_clip_max_norm
+                print(
+                    f"  grad_norm={float(raw_norm):.4g}"
+                    + (" [CLIPPED]" if clipped else "")
+                )
             torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
             optimizer.step()
             if scheduler is not None:
@@ -430,36 +481,10 @@ def adam_refine_hemo_total_cellularity(
                     alpha_bounds=alpha_bounds,
                 )
 
-            alpha_scalar = (
-                float(alpha_t.detach().item())
-                if alpha_t is not None
-                else float("nan")
-            )
-            snap = _snapshot_trainable(model, train_names, alpha_t)
-            history.append(
-                AdamHemoInvasionRecord(
-                    step=step,
-                    loss=loss_val,
-                    B=float(model.B.detach().reshape(()).cpu().item()),
-                    K=float(model.K.detach().reshape(()).cpu().item()),
-                    alpha_rt=alpha_scalar,
-                    snapshot=snap,
-                )
-            )
-            _elapsed = _time.perf_counter() - _t0
-            if verbose and log_every > 0 and step % log_every == 0:
-                parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
-                msg = (
-                    f"step {step:03d}: SSE={loss_val:.4e} | "
-                    + " ".join(parts)
-                    + f"  [{_elapsed:.1f}s]"
-                )
-                print(msg)
-
         return history
     finally:
         for name in reversed(log_space_registered):
             if is_parametrized(model, name):
                 remove_parametrizations(
-                    model, name, leave_parametrized=False
+                    model, name, leave_parametrized=True  # keep physical value, not log-space u
                 )
