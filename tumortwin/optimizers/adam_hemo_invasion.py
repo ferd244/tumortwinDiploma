@@ -464,6 +464,12 @@ def adam_refine_hemo_total_cellularity(
             )
             loss_val = float(loss.detach())
             loss.backward()
+            if verbose and step % log_every == 0:
+                for name, leaf in zip(train_names, params):
+                    if leaf.grad is not None:
+                        print(f"  grad[{name}] = {leaf.grad.item():.4e}")
+                    else:
+                        print(f"  grad[{name}] = None (нет градиента!)")
             torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
             optimizer.step()
             if scheduler is not None:
