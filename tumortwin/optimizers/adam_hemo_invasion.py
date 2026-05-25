@@ -5,6 +5,9 @@ total cellularity (``n + m``) with optional radiotherapy ``alpha`` in the graph.
 Typical use: warm-start from LM, fix diffusion ``Dn``, and fine-tune ``B``, ``K``, and
 linear–radiosensitivity ``alpha`` with gradient clipping and box constraints.
 
+The objective defaults to pure SSE on total cellularity; optional soft Dice and
+per-timestep volume MSE can be mixed in via ``loss_w_dice`` / ``loss_w_vol``.
+
 Use ``calibrate_params`` to optimize any subset of scalar model parameters (see
 ``HEMO_INVASION_ADAM_PARAM_NAMES``).
 """
@@ -42,6 +45,58 @@ HEMO_INVASION_ADAM_PARAM_NAMES: FrozenSet[str] = frozenset(
 HEMO_INVASION_POSITIVE_SCALAR_NAMES: FrozenSet[str] = frozenset(
     {"B", "Dn", "Ds", "k_s", "s_star", "K", "s_crit", "s_smooth"}
 )
+
+
+def _soft_dice_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float = 0.05,
+    smooth: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Differentiable soft Dice versus a binary mask derived from ``target``.
+
+    ``pred`` — typically ``clamp(n + m, 0, 1)``; gradients flow only through ``pred``.
+    ``target`` is thresholded without gradients (constants are fine).
+    """
+    tgt_mask = (target > threshold).to(dtype=pred.dtype)
+    intersection = (pred * tgt_mask).sum()
+    denom = pred.sum() + tgt_mask.sum()
+    return 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
+
+
+def _soft_volume_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float = 0.05,
+) -> torch.Tensor:
+    """MSE of predicted spatial sums vs voxel counts in the masked target, per timestep."""
+    pred_vols = pred.sum(dim=(-3, -2, -1))
+    tgt_vols = (target > threshold).to(dtype=pred.dtype).sum(dim=(-3, -2, -1))
+    return torch.nn.functional.mse_loss(pred_vols, tgt_vols)
+
+
+def _combined_hemo_loss(
+    pred: torch.Tensor,
+    y_target: torch.Tensor,
+    *,
+    w_sse: float = 1.0,
+    w_dice: float = 0.0,
+    w_vol: float = 0.0,
+    mask_threshold: float = 0.05,
+) -> torch.Tensor:
+    """L = w_sse * SSE + w_dice * SoftDice + w_vol * VolumeMSE (whole calibration stack)."""
+    pc = torch.clamp(pred, 0.0, 1.0)
+    loss = w_sse * ((pc - y_target) ** 2).sum()
+    if w_dice != 0.0:
+        loss = loss + w_dice * _soft_dice_loss(
+            pc, y_target, threshold=mask_threshold
+        )
+    if w_vol != 0.0:
+        loss = loss + w_vol * _soft_volume_loss(
+            pc, y_target, threshold=mask_threshold
+        )
+    return loss
 
 
 class _PositiveExpScalarParam(nn.Module):
@@ -247,7 +302,7 @@ def adam_refine_hemo_total_cellularity(
     initial_values: Optional[Dict[str, float]] = None,
     num_steps: int = 50,
     lr: float = 1e-3,
-    grad_clip_max_norm: float = 10.0,
+    grad_clip_max_norm: float = 1.0,
     b_bounds: Tuple[float, float] = (3.5, 4.5),
     k_bounds: Tuple[float, float] = (0.8, 1.5),
     alpha_bounds: Tuple[float, float] = (0.03, 0.09),
@@ -260,12 +315,15 @@ def adam_refine_hemo_total_cellularity(
     cosine_scheduler_T_max: Optional[int] = None,
     cosine_scheduler_eta_min: float = 1e-3,
     log_every: int = 5,
-    log_grad_norm: bool = False,
     verbose: bool = True,
+    loss_w_sse: float = 1.0,
+    loss_w_dice: float = 0.0,
+    loss_w_vol: float = 0.0,
+    loss_mask_threshold: float = 0.05,
 ) -> List[AdamHemoInvasionRecord]:
     """
-    Minimize sum of squared errors between predicted total cellularity ``clamp(n+m)``
-    and ``y_target`` at ``timepoints``.
+    Minimize a weighted loss between predicted total cellularity ``clamp(n+m)``
+    and ``y_target`` at ``timepoints``: SSE plus optional soft Dice / volume penalties.
 
     Default (``calibrate_params is None``): train ``B`` and ``K``; if radiotherapy is set,
     also train ``alpha`` as a scalar leaf on ``radiotherapy_specification`` (same as
@@ -285,52 +343,32 @@ def adam_refine_hemo_total_cellularity(
     ``alpha_rt`` is always optimized in linear space. Exp parametrizations are removed
     when this function returns so the model exposes plain ``nn.Parameter`` fields again.
 
-    .. note::
-        **Adjoint vs direct backprop.** When calibrating a small number of scalar
-        parameters (<=5), pass ``use_adjoint=False`` in
-        :class:`~tumortwin.solvers.TorchDiffEqSolverOptions`. Adjoint requires a full
-        backward ODE solve whose cost equals the forward pass -- typically 3x slower per
-        step for few parameters. Direct autograd is faster and produces cleaner gradients.
-
-    .. note::
-        **Cosine scheduler and ``num_steps``.** Setting ``cosine_scheduler_T_max`` equal
-        to ``num_steps`` halves the learning rate by the midpoint and drops it to
-        ``eta_min`` by the last step. For aggressive short runs (< 20 steps) prefer
-        either no scheduler (``cosine_scheduler_T_max=None``) or set ``T_max`` to 2-3x
-        ``num_steps`` to keep the rate high for longer.
-
     Args:
         model: Hemodynamic invasion model.
         solver: Object with ``solve(timepoints=..., u_initial=...) -> (_, trajectory)``.
-            Pass ``use_adjoint=False`` in solver options for faster per-step gradients
-            when calibrating <=5 scalar parameters.
         y_target: Tensor shaped like the predicted maps (e.g. ``(T, D, H, W)``).
         timepoints: Wall-clock times, same length as leading dim of ``y_target``.
         calibrate_params: Optional explicit list of scalar parameters to train.
         param_bounds: Optional per-name ``(low, high)`` clamps after each Adam step.
         initial_values: Optional warm-start scalars for trained parameters (by name).
         num_steps: Adam iterations.
-        lr: Learning rate. Typical range 0.05-0.15 for log-space calibration.
-        grad_clip_max_norm: Global L2 norm clip applied to the parameter gradient vector
-            before the Adam step. Default 10.0 allows bold steps; lower values (e.g. 1.0)
-            severely restrict step size when the number of calibrated parameters is small
-            (max per-component gradient = clip / sqrt(n_params)). Set to float('inf') to
-            disable clipping entirely.
+        lr: Learning rate.
+        grad_clip_max_norm: Global L2 norm clip for optimized tensors.
         b_bounds / k_bounds / alpha_bounds: Default box constraints for those names.
         initial_B / initial_K / initial_alpha_rt: Legacy warm-start (merged into
             ``initial_values`` when the corresponding parameter is trained).
         fix_Dn: Legacy: when ``calibrate_params is None``, freeze ``Dn``.
         calibrate_log_space: Reparametrize positive scalars as ``exp(u)`` for Adam on ``u``.
-        adam_amsgrad: Pass-through to ``torch.optim.Adam(..., amsgrad=...)``. AMSGrad is
-            more conservative; prefer ``False`` for aggressive short runs.
+        adam_amsgrad: Pass-through to ``torch.optim.Adam(..., amsgrad=...)``.
         cosine_scheduler_T_max: If set, wraps Adam in
             :class:`~torch.optim.lr_scheduler.CosineAnnealingLR` with this ``T_max``.
-            Set to at least 2x ``num_steps`` to avoid premature lr decay.
         cosine_scheduler_eta_min: Minimum LR for cosine annealing.
         log_every: Print every this many steps if ``verbose`` (also step 0).
-        log_grad_norm: If ``True``, print the raw gradient L2 norm before clipping.
-            Useful for diagnosing whether ``grad_clip_max_norm`` is binding.
         verbose: Print progress lines.
+        loss_w_sse: Weight on summed squared error (same as legacy pure SSE when dice/vol are 0).
+        loss_w_dice: Weight on :func:`_soft_dice_loss` (overlap with mask from ``y_target``).
+        loss_w_vol: Weight on :func:`_soft_volume_loss` (per-frame volume MSE).
+        loss_mask_threshold: Threshold applied to ``y_target`` for Dice / volume terms.
 
     Returns:
         List of :class:`AdamHemoInvasionRecord`, one per iteration.
@@ -424,11 +462,33 @@ def adam_refine_hemo_total_cellularity(
             m = extract_trajectory_component(traj, 1)
             pred = torch.clamp(n + m, 0.0, 1.0)
 
-            loss = ((pred - y_target) ** 2).sum()
+            loss = _combined_hemo_loss(
+                pred,
+                y_target,
+                w_sse=loss_w_sse,
+                w_dice=loss_w_dice,
+                w_vol=loss_w_vol,
+                mask_threshold=loss_mask_threshold,
+            )
             loss_val = float(loss.detach())
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
-            # Snapshot and log BEFORE the update so that loss and params are
-            # consistent (both reflect the parameters used in this forward pass).
+            with torch.no_grad():
+                _clamp_trainable(
+                    model,
+                    train_names,
+                    alpha_t,
+                    rt,
+                    param_bounds=param_bounds,
+                    b_bounds=b_bounds,
+                    k_bounds=k_bounds,
+                    alpha_bounds=alpha_bounds,
+                )
+
             alpha_scalar = (
                 float(alpha_t.detach().item())
                 if alpha_t is not None
@@ -447,44 +507,13 @@ def adam_refine_hemo_total_cellularity(
             )
             if verbose and log_every > 0 and step % log_every == 0:
                 parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
-                current_lr = optimizer.param_groups[0]["lr"]
-                msg = (
-                    f"step {step:03d}: SSE={loss_val:.4e} | lr={current_lr:.4g} | "
-                    + " ".join(parts)
-                )
+                msg = f"step {step:03d}: loss={loss_val:.4e} | " + " ".join(parts)
                 print(msg)
-
-            loss.backward()
-            if log_grad_norm and verbose:
-                raw_norm = torch.nn.utils.clip_grad_norm_(
-                    params, max_norm=float("inf")
-                )
-                clipped = raw_norm > grad_clip_max_norm
-                print(
-                    f"  grad_norm={float(raw_norm):.4g}"
-                    + (" [CLIPPED]" if clipped else "")
-                )
-            torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_max_norm)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-
-            with torch.no_grad():
-                _clamp_trainable(
-                    model,
-                    train_names,
-                    alpha_t,
-                    rt,
-                    param_bounds=param_bounds,
-                    b_bounds=b_bounds,
-                    k_bounds=k_bounds,
-                    alpha_bounds=alpha_bounds,
-                )
 
         return history
     finally:
         for name in reversed(log_space_registered):
             if is_parametrized(model, name):
                 remove_parametrizations(
-                    model, name, leave_parametrized=True  # keep physical value, not log-space u
+                    model, name, leave_parametrized=False
                 )
