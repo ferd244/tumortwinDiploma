@@ -300,7 +300,7 @@ def adam_refine_hemo_total_cellularity(
     initial_values: Optional[Dict[str, float]] = None,
     num_steps: int = 50,
     lr: float = 1e-3,
-    grad_clip_max_norm: float = 1.0,
+    grad_clip_max_norm: float = 10.0,
     b_bounds: Tuple[float, float] = (3.5, 4.5),
     k_bounds: Tuple[float, float] = (0.8, 1.5),
     alpha_bounds: Tuple[float, float] = (0.03, 0.09),
@@ -513,5 +513,5 @@ def adam_refine_hemo_total_cellularity(
         for name in reversed(log_space_registered):
             if is_parametrized(model, name):
                 remove_parametrizations(
-                    model, name, leave_parametrized=False
+                    model, name, leave_parametrized=True
                 )
