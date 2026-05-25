@@ -47,22 +47,16 @@ HEMO_INVASION_POSITIVE_SCALAR_NAMES: FrozenSet[str] = frozenset(
 )
 
 
-def _soft_dice_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    threshold: float = 0.05,
-    smooth: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Differentiable soft Dice versus a binary mask derived from ``target``.
-
-    ``pred`` — typically ``clamp(n + m, 0, 1)``; gradients flow only through ``pred``.
-    ``target`` is thresholded without gradients (constants are fine).
-    """
-    tgt_mask = (target > threshold).to(dtype=pred.dtype)
-    intersection = (pred * tgt_mask).sum()
-    denom = pred.sum() + tgt_mask.sum()
-    return 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
+def _soft_dice_loss_temporal(pred, target, threshold=0.05, smooth=1e-6):
+    """Mean Dice over time frames — stronger gradient for spatial spread."""
+    T = pred.shape[0]
+    losses = []
+    for t in range(T):
+        tgt_mask = (target[t] > threshold).to(dtype=pred.dtype)
+        intersection = (pred[t] * tgt_mask).sum()
+        denom = pred[t].sum() + tgt_mask.sum()
+        losses.append(1.0 - (2.0 * intersection + smooth) / (denom + smooth))
+    return torch.stack(losses).mean()
 
 
 def _soft_volume_loss(
@@ -87,7 +81,7 @@ def _combined_hemo_loss(
     pc = torch.clamp(pred, 0.0, 1.0)
     loss = w_sse * ((pc - y_target) ** 2).sum()
     if w_dice != 0.0:
-        loss = loss + w_dice * _soft_dice_loss(
+        loss = loss + w_dice * _soft_dice_loss_temporal(
             pc, y_target, threshold=mask_threshold
         )
     if w_vol != 0.0:
