@@ -70,12 +70,10 @@ def _soft_volume_loss(
     target: torch.Tensor,
     threshold: float = 0.05,
 ) -> torch.Tensor:
-    """MSE of predicted spatial sums vs voxel counts in the masked target, per timestep."""
-    pred_vols = pred.sum(dim=(-3, -2, -1))
-    tgt_vols = (target > threshold).to(dtype=pred.dtype).sum(dim=(-3, -2, -1))
+    total_voxels = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+    pred_vols = pred.sum(dim=(-3,-2,-1)) / total_voxels          
+    tgt_vols  = (target > threshold).to(dtype=pred.dtype).sum(dim=(-3,-2,-1)) / total_voxels                
     return torch.nn.functional.mse_loss(pred_vols, tgt_vols)
-
-
 def _combined_hemo_loss(
     pred: torch.Tensor,
     y_target: torch.Tensor,
