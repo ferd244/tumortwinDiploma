@@ -512,7 +512,7 @@ def adam_refine_hemo_total_cellularity(
                     snapshot=snap,
                 )
             )
-            if verbose and log_every > 0 and step % log_every == 0:
+            if verbose:
                 parts = [f"{k}={snap[k]:.5g}" for k in sorted(snap.keys())]
                 msg = f"step {step:03d}: loss={loss_val:.4e} | " + " ".join(parts)
                 print(msg)
