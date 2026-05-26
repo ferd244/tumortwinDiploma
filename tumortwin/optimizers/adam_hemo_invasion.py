@@ -294,6 +294,7 @@ def adam_refine_hemo_total_cellularity(
     initial_values: Optional[Dict[str, float]] = None,
     num_steps: int = 50,
     lr: float = 1e-3,
+    param_lrs: Optional[Dict[str, float]] = None,  
     grad_clip_max_norm: float = 10.0,
     b_bounds: Tuple[float, float] = (3.5, 4.5),
     k_bounds: Tuple[float, float] = (0.8, 1.5),
@@ -433,8 +434,16 @@ def adam_refine_hemo_total_cellularity(
                             rt.alpha = alpha_t
                 else:
                     _assign_trainable_physical(model, key, float(val))
-
-        optimizer = torch.optim.Adam(params, lr=lr, amsgrad=adam_amsgrad)
+        
+        if param_lrs:
+            param_groups = [
+                {"params": [leaf], "lr": param_lrs.get(name, lr)}
+                for name, leaf in zip(train_names, params)
+            ]
+            optimizer = torch.optim.Adam(param_groups, lr=lr, amsgrad=adam_amsgrad)
+        else:
+            optimizer = torch.optim.Adam(params, lr=lr, amsgrad=adam_amsgrad)
+            
         scheduler = None
         if cosine_scheduler_T_max is not None:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
