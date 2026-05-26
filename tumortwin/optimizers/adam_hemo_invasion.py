@@ -473,7 +473,7 @@ def adam_refine_hemo_total_cellularity(
             )
             loss_val = float(loss.detach())
             loss.backward()
-            if verbose and step % log_every == 0:
+            if verbose:
                 for name, leaf in zip(train_names, params):
                     if leaf.grad is not None:
                         print(f"  grad[{name}] = {leaf.grad.item():.4e}")
