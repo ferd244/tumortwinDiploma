@@ -269,7 +269,7 @@ class HemoInvasion3D(PDESystemModel3D):
         rhs_m = torch.nan_to_num(rhs * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         for _ in range(self.poisson_iterations):
             lap = self.spatial_fd.laplacian(phi)
-            phi = phi - alpha * (rhs_m - lap)   # ← corrected sign (was +)
+            phi = phi - alpha * (rhs_m - lap)
             phi = torch.nan_to_num(phi * mask, nan=0.0, posinf=1e6, neginf=-1e6)
         return phi
 
