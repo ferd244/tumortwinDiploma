@@ -131,29 +131,50 @@ class TorchDiffEqSolver(ForwardSolver):
             ``tumortwin.models.extract_trajectory_component(u, component_idx=0)``.
         """
         self.solver_options.device = self.model.device
+        opts = self.solver_options
+        is_adaptive = opts.method in ADAPTIVE_TORCHDIFFEQ_METHODS
 
+        total_days = days_since_first(timepoints[-1], timepoints[0])
+        step_str = (
+            f"adaptive ({opts.method})"
+            if is_adaptive
+            else f"{timedelta_to_days(opts.step_size):.2f} days"
+        )
+        # Avoid total=0 (breaks some tqdm backends). Default bar_format only:
+        # custom format strings can raise in tqdm.notebook.__del__ when fields are None.
+        pb_total = max(1, round(total_days))
         self.model.progress_bar = tqdm.tqdm(
-            total=days_since_first(timepoints[-1], timepoints[0]),
-            desc=f"Forward Simulation: [{timepoints[0]} to {timepoints[-1]} with timestep {timedelta_to_days(self.solver_options.step_size):.2f} days]",
-            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n:.1f}/{total:.1f} days elapsed",
+            total=pb_total,
+            desc=f"Simulation [{step_str}]: [{timepoints[0]} to {timepoints[-1]}]",
+            unit="day",
+            miniters=1,
         )
 
         t = torch.tensor(
-            [days_since_first(t, timepoints[0]) for t in timepoints],
-            device=self.solver_options.device,
+            [days_since_first(tp, timepoints[0]) for tp in timepoints],
+            device=opts.device,
         )
 
-        u_initial = u_initial.to(self.solver_options.device)
-        integrator = odeint_adjoint if self.solver_options.use_adjoint else odeint
-        u = integrator(
-            self.model,
-            u_initial,
-            t,
-            rtol=self.solver_options.rtol,
-            atol=self.solver_options.atol,
-            method=self.solver_options.method,
-            options=self._odeint_options(u_initial, t),
-        )
+        u_initial = u_initial.to(opts.device)
+        integrator = odeint_adjoint if opts.use_adjoint else odeint
+        try:
+            u = integrator(
+                self.model,
+                u_initial,
+                t,
+                rtol=opts.rtol,
+                atol=opts.atol,
+                method=opts.method,
+                options=self._odeint_options(u_initial, t),
+            )
+        finally:
+            pb = getattr(self.model, "progress_bar", None)
+            if pb is not None:
+                try:
+                    pb.close()
+                except (TypeError, AttributeError, RuntimeError):
+                    pass
+                self.model.progress_bar = None
         return t, u
 
     @staticmethod
@@ -188,7 +209,8 @@ class TorchDiffEqSolver(ForwardSolver):
 
     def _extract_treatment_days(self, start_time, end_time) -> Tuple[List[float], List[float]]:
         """
-        Collect treatment event days in (start_time, end_time).
+        Collect treatment event days on the closed integration span
+        ``[min(start_time,end_time), max(...)]`` (with a tiny tolerance for float noise).
 
         Uses attribute-safe access so PDE-system models without treatment metadata
         still work with the same solver/grid constructor.
@@ -196,6 +218,13 @@ class TorchDiffEqSolver(ForwardSolver):
         model = self.model
         model_name = model.__class__.__name__
         t_initial = getattr(model, "t_initial", None)
+        st_f = float(start_time)
+        en_f = float(end_time)
+
+        def _in_integration_span(day: float) -> bool:
+            if st_f <= en_f:
+                return st_f - 1e-9 <= day <= en_f + 1e-9
+            return en_f - 1e-9 <= day <= st_f + 1e-9
 
         radiotherapy_days: List[float] = []
         rt_spec = getattr(model, "radiotherapy_specification", None)
@@ -208,7 +237,9 @@ class TorchDiffEqSolver(ForwardSolver):
                     model_name=model_name,
                     schedule_name="radiotherapy_specification.times",
                 )
-                if start_time < day < end_time:
+                # Inclusive endpoints: strict ``start < day < end`` dropped fractions on the
+                # first/last simulated day and any event with day index 0.
+                if _in_integration_span(day):
                     radiotherapy_days.append(day)
 
         chemotherapy_days: List[float] = []
@@ -222,7 +253,7 @@ class TorchDiffEqSolver(ForwardSolver):
                     model_name=model_name,
                     schedule_name="chemotherapy_specifications[].times",
                 )
-                if start_time < day < end_time:
+                if _in_integration_span(day):
                     chemotherapy_days.append(day)
 
         return radiotherapy_days, chemotherapy_days

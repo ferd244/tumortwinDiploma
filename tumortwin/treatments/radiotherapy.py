@@ -1,7 +1,8 @@
-from typing import Dict
+from typing import Dict, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 from tumortwin.types import RadiotherapySpecification, TreatmentTime
 
@@ -26,16 +27,19 @@ def compute_radiotherapy_cell_death_fractions(
     Returns:
         Dict[TreatmentTime, float]: A dictionary mapping treatment times to cell survival fractions.
     """
+    rt_a = radiotherapy_specification.alpha
+    if isinstance(rt_a, torch.Tensor):
+        rt_a = float(rt_a.detach().cpu().item())
     beta = alpha / alpha_beta_ratio
     return {
-        day: np.exp(-radiotherapy_specification.alpha * (alpha * dose + beta * dose**2))
+        day: np.exp(-rt_a * (alpha * dose + beta * dose**2))
         for day, dose in radiotherapy_specification.protocol.items()
     }
 
 
 def compute_radiotherapy_cell_survival_fraction(
     rt: RadiotherapySpecification, dose: float
-) -> float:
+) -> Union[float, torch.Tensor]:
     """
     Compute the cell survival fraction for a single radiotherapy dose.
 
@@ -48,10 +52,13 @@ def compute_radiotherapy_cell_survival_fraction(
         dose (float): The radiation dose administered.
 
     Returns:
-        float: The fraction of cells surviving the dose.
+        Scalar float, or a 0-dim tensor when ``rt.alpha`` is a tensor (e.g. learned).
     """
     beta = rt.alpha / rt.alpha_beta_ratio
-    return np.exp(-(rt.alpha * dose + beta * dose**2))
+    quad = rt.alpha * dose + beta * dose**2
+    if isinstance(quad, torch.Tensor):
+        return torch.exp(-quad)
+    return float(np.exp(-quad))
 
 
 def plot_radiotherapy(radiotherapy_specification: RadiotherapySpecification) -> None:

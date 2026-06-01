@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from tumortwin.models.hemo_invasion_3d import HemoInvasion3D
 from tumortwin.models.base import TumorGrowthModel3D
-from tumortwin.models.pde_system import extract_trajectory_component
+from tumortwin.models.pde_system import extract_trajectory_component, extract_trajectory_sum_components
 from tumortwin.solvers.torch_solver import TorchDiffEqSolver, TorchDiffEqSolverOptions
 from tumortwin.types.imaging import NibabelNifti
 
@@ -54,6 +54,27 @@ def test_hemo_forward_shape_and_finite(tiny_hemo_model):
     du = model.forward(torch.tensor(0.0), u0)
     assert du.shape == u0.shape
     assert torch.all(torch.isfinite(du))
+
+
+def test_hemo_total_cellularity_equals_n_plus_m(tiny_hemo_model):
+    model, shape = tiny_hemo_model
+    solver = TorchDiffEqSolver(
+        model,
+        TorchDiffEqSolverOptions(
+            step_size=timedelta(days=1.0),
+            method="rk4",
+            device=torch.device("cpu"),
+            use_adjoint=False,
+        ),
+    )
+    t0 = datetime(2020, 1, 1)
+    timepoints = [t0, t0 + timedelta(days=1.0)]
+    _, u_traj = solver.solve(timepoints, model.get_initial_state())
+    n = extract_trajectory_component(u_traj, 0)
+    m = extract_trajectory_component(u_traj, 1)
+    tot = extract_trajectory_sum_components(u_traj, HemoInvasion3D.total_cellularity_component_indices)
+    assert tot.shape == n.shape
+    assert torch.allclose(tot, n + m)
 
 
 def test_torch_solver_short_run_hemo(tiny_hemo_model):

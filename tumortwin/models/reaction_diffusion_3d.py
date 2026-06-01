@@ -187,8 +187,14 @@ class ReactionDiffusion3D(TumorGrowthModel3D):
         Returns:
             u (torch.Tensor): Updated tumor density field.
         """
-        if self.progress_bar:
-            self.progress_bar.update(dt.detach().item())
+        if self.progress_bar is not None:
+            try:
+                new_n = int(t.detach().item() + dt.detach().item())
+                delta = new_n - int(self.progress_bar.n)
+                if delta > 0:
+                    self.progress_bar.update(delta)
+            except (TypeError, AttributeError, ValueError):
+                pass
         t_days = t.detach().item()
         if (
             self.radiotherapy_specification is not None
