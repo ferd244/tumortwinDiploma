@@ -1,7 +1,6 @@
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Self, TypeAlias, Union
-
 import numpy as np
 import torch
 from pydantic import BaseModel, model_validator
